@@ -33,10 +33,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # setup-go's built-in module cache (enabled by default) keys the cache on
+      # go.sum, but defaults to only the root module's go.sum. This job also
+      # vets/tests the infra/ module, whose go.sum pulls the heavy Pulumi SDKs
+      # (pulumi/sdk, pulumi-cloudflare, pulumi-gcp). Point cache-dependency-path
+      # at both go.sum files so infra/'s deps are restored from cache instead of
+      # re-downloaded every run. The cache is populated on the first (cold) run
+      # and speeds up subsequent (warm) runs.
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
+          cache-dependency-path: |
+            go.sum
+            infra/go.sum
 
       # TinyGo is needed only for the Wasm Worker build (pnpm run build).
       # install-binaryen (default true) provides wasm-opt, which TinyGo invokes
