@@ -1,7 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -14,9 +18,10 @@ const testProject = "libremail-bug-report-ingest-infra"
 
 // Resource type tokens registered by the program.
 const (
-	tokWorkersScript = "cloudflare:index/workersScript:WorkersScript"
-	tokR2Bucket      = "cloudflare:index/r2Bucket:R2Bucket"
-	tokDNSRecordSet  = "gcp:dns/recordSet:RecordSet"
+	tokWorkersScript      = "cloudflare:index/workersScript:WorkersScript"
+	tokR2Bucket           = "cloudflare:index/r2Bucket:R2Bucket"
+	tokWorkersCronTrigger = "cloudflare:index/workersCronTrigger:WorkersCronTrigger"
+	tokDNSRecordSet       = "gcp:dns/recordSet:RecordSet"
 )
 
 // recordingMocks implements pulumi.MockResourceMonitor, capturing every
@@ -54,6 +59,7 @@ func key(k string) string { return testProject + ":" + k }
 func fullConfig() map[string]string {
 	return map[string]string{
 		key("cloudflareAccountId"): "cf-acct-123",
+		key("secretsStoreId"):      "ss-store-xyz",
 		key("dnsManagedZone"):      "libremail-zone",
 		key("dnsRecordName"):       "bugreport.example.com.",
 		key("dnsRecordTarget"):     "libremail-bug-report-ingest.acme.workers.dev.",
@@ -93,6 +99,34 @@ func strProp(t *testing.T, pm resource.PropertyMap, k string) string {
 	return v.StringValue()
 }
 
+// objArray returns pm[k] as a slice of PropertyMaps, failing if it is absent or
+// not an array of objects. Used to walk the Worker bindings / cron schedules.
+func objArray(t *testing.T, pm resource.PropertyMap, k string) []resource.PropertyMap {
+	t.Helper()
+	v, ok := pm[resource.PropertyKey(k)]
+	if !ok || !v.IsArray() {
+		t.Fatalf("property %q missing or not an array: %v", k, pm.Mappable())
+	}
+	out := make([]resource.PropertyMap, 0, len(v.ArrayValue()))
+	for i, el := range v.ArrayValue() {
+		if !el.IsObject() {
+			t.Fatalf("%s[%d] is not an object: %v", k, i, el)
+		}
+		out = append(out, el.ObjectValue())
+	}
+	return out
+}
+
+// bindingsByName indexes the Worker's bindings array by its "name" (the JS var).
+func bindingsByName(t *testing.T, in resource.PropertyMap) map[string]resource.PropertyMap {
+	t.Helper()
+	out := map[string]resource.PropertyMap{}
+	for _, b := range objArray(t, in, "bindings") {
+		out[strProp(t, b, "name")] = b
+	}
+	return out
+}
+
 func TestWorkerScriptRegistered(t *testing.T) {
 	m := runProgram(t, fullConfig())
 	in := m.find(t, tokWorkersScript).Inputs
@@ -111,6 +145,128 @@ func TestWorkerScriptRegistered(t *testing.T) {
 	}
 	if got := strProp(t, in, "content"); got == "" {
 		t.Error("content is empty; want a non-empty (placeholder) Worker module body")
+	}
+}
+
+// TestWorkerScriptBindings is the core coverage for #4/#9: the deployed Worker
+// must carry the R2 bucket binding, the four Secrets Store bindings, and the
+// three plain vars, with the exact names/store/secret_name the Worker reads at
+// runtime (wrangler.jsonc contract).
+func TestWorkerScriptBindings(t *testing.T) {
+	m := runProgram(t, fullConfig())
+	in := m.find(t, tokWorkersScript).Inputs
+	bindings := bindingsByName(t, in)
+
+	// R2 bucket binding.
+	r2, ok := bindings["REPORTS_BUCKET"]
+	if !ok {
+		t.Fatalf("missing REPORTS_BUCKET binding; have %v", bindingNames(bindings))
+	}
+	if got, want := strProp(t, r2, "type"), "r2_bucket"; got != want {
+		t.Errorf("REPORTS_BUCKET type = %q, want %q", got, want)
+	}
+	if got, want := strProp(t, r2, "bucketName"), "libremail-bug-reports"; got != want {
+		t.Errorf("REPORTS_BUCKET bucketName = %q, want %q", got, want)
+	}
+
+	// Secrets Store bindings: name -> secret_name (all share the one store id).
+	wantSecrets := map[string]string{
+		"BUGREPORT_ENC_KEYRING":      "bugreport-enc-keyring",
+		"ADMIN_TOKEN":                "bugreport-admin-token",
+		"GITHUB_TOKEN":               "github-token",
+		"OTEL_EXPORTER_OTLP_HEADERS": "otel-exporter-otlp-headers",
+	}
+	for name, wantSecretName := range wantSecrets {
+		b, ok := bindings[name]
+		if !ok {
+			t.Errorf("missing Secrets Store binding %q; have %v", name, bindingNames(bindings))
+			continue
+		}
+		if got, want := strProp(t, b, "type"), "secrets_store_secret"; got != want {
+			t.Errorf("%s type = %q, want %q", name, got, want)
+		}
+		if got, want := strProp(t, b, "storeId"), "ss-store-xyz"; got != want {
+			t.Errorf("%s storeId = %q, want %q", name, got, want)
+		}
+		if got := strProp(t, b, "secretName"); got != wantSecretName {
+			t.Errorf("%s secretName = %q, want %q", name, got, wantSecretName)
+		}
+	}
+
+	// Plain-text vars.
+	wantVars := map[string]string{
+		"GITHUB_REPO":                 "JMR-dev/LibreMail",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "",
+		"OTEL_SERVICE_NAME":           "libremail-bug-report-ingest",
+	}
+	for name, wantText := range wantVars {
+		b, ok := bindings[name]
+		if !ok {
+			t.Errorf("missing plain var binding %q; have %v", name, bindingNames(bindings))
+			continue
+		}
+		if got, want := strProp(t, b, "type"), "plain_text"; got != want {
+			t.Errorf("%s type = %q, want %q", name, got, want)
+		}
+		if got := textValue(b); got != wantText {
+			t.Errorf("%s text = %q, want %q", name, got, wantText)
+		}
+	}
+}
+
+// bindingNames is a small diagnostic helper for failure messages.
+func bindingNames(bindings map[string]resource.PropertyMap) []string {
+	names := make([]string, 0, len(bindings))
+	for n := range bindings {
+		names = append(names, n)
+	}
+	return names
+}
+
+// textValue reads a binding's "text" property, treating an absent property as the
+// empty string (an empty plain-text var may serialize either way).
+func textValue(b resource.PropertyMap) string {
+	v, ok := b[resource.PropertyKey("text")]
+	if !ok {
+		return ""
+	}
+	if !v.IsString() {
+		return ""
+	}
+	return v.StringValue()
+}
+
+// TestWorkerContentFromArtifact verifies the artifact-override path: when
+// workerScriptPath is set (as the CD workflow sets it to ../build/worker.mjs
+// after `pnpm run build`), the Worker uploads the built file via ContentFile +
+// a computed ContentSha256 instead of the inline placeholder content.
+func TestWorkerContentFromArtifact(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "worker.mjs")
+	body := []byte("export default { async fetch() { return new Response('ok'); } };\n")
+	if err := os.WriteFile(artifact, body, 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	wantSha := hex.EncodeToString(sum[:])
+
+	cfg := fullConfig()
+	cfg[key("workerScriptPath")] = artifact
+	m := runProgram(t, cfg)
+	in := m.find(t, tokWorkersScript).Inputs
+
+	if got, want := strProp(t, in, "contentFile"), artifact; got != want {
+		t.Errorf("contentFile = %q, want %q", got, want)
+	}
+	if got := strProp(t, in, "contentSha256"); got != wantSha {
+		t.Errorf("contentSha256 = %q, want %q", got, wantSha)
+	}
+	if _, ok := in[resource.PropertyKey("content")]; ok {
+		t.Error("content should be unset when workerScriptPath drives a ContentFile upload")
+	}
+	// Bindings must still be attached in the artifact path.
+	if _, ok := bindingsByName(t, in)["REPORTS_BUCKET"]; !ok {
+		t.Error("REPORTS_BUCKET binding missing on the artifact-content Worker")
 	}
 }
 
@@ -169,13 +325,43 @@ func TestDNSRecordRegistered(t *testing.T) {
 	}
 }
 
-func TestExactlyThreeManagedResources(t *testing.T) {
+// TestWorkerCronTriggers asserts the two Friday UTC crons (#13) are registered as
+// a WorkersCronTrigger bound to the ingest Worker.
+func TestWorkerCronTriggers(t *testing.T) {
+	m := runProgram(t, fullConfig())
+	in := m.find(t, tokWorkersCronTrigger).Inputs
+
+	if got, want := strProp(t, in, "scriptName"), "libremail-bug-report-ingest"; got != want {
+		t.Errorf("cron scriptName = %q, want %q", got, want)
+	}
+	if got, want := strProp(t, in, "accountId"), "cf-acct-123"; got != want {
+		t.Errorf("cron accountId = %q, want %q", got, want)
+	}
+
+	var crons []string
+	for _, s := range objArray(t, in, "schedules") {
+		crons = append(crons, strProp(t, s, "cron"))
+	}
+	want := []string{"0 22 * * 5", "0 23 * * 5"}
+	if len(crons) != len(want) {
+		t.Fatalf("cron schedules = %v, want %v", crons, want)
+	}
+	for i := range want {
+		if crons[i] != want[i] {
+			t.Errorf("schedules[%d] = %q, want %q", i, crons[i], want[i])
+		}
+	}
+}
+
+// TestManagedResourceCounts pins the managed resource set: exactly one each of the
+// Worker script, R2 bucket, cron trigger, and DNS record.
+func TestManagedResourceCounts(t *testing.T) {
 	m := runProgram(t, fullConfig())
 	counts := map[string]int{}
 	for _, r := range m.resources {
 		counts[r.TypeToken]++
 	}
-	for _, tok := range []string{tokWorkersScript, tokR2Bucket, tokDNSRecordSet} {
+	for _, tok := range []string{tokWorkersScript, tokR2Bucket, tokWorkersCronTrigger, tokDNSRecordSet} {
 		if counts[tok] != 1 {
 			t.Errorf("expected exactly 1 %s, got %d", tok, counts[tok])
 		}
