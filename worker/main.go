@@ -14,8 +14,12 @@ import (
 	"github.com/syumai/workers"
 
 	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/handler"
+	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/storage"
 )
 
 func main() {
-	workers.Serve(handler.New())
+	// The real storage Sink (#9): scrub -> AES-256-GCM encrypt -> R2 put, with the
+	// keyring loaded from Cloudflare Secrets Store on first request. Bindings
+	// (REPORTS_BUCKET, BUGREPORT_ENC_KEYRING) are declared in wrangler.jsonc.
+	workers.Serve(handler.New(storage.NewWorkerSink()))
 }

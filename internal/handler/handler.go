@@ -27,13 +27,14 @@ const serviceName = "libremail-bug-report-ingest"
 // Any other path returns 404. On the health/hello endpoints any non-GET method
 // returns 405; on /v1/reports any non-POST method returns 405 (Allow: POST).
 //
-// The ingest endpoint is wired with a NopSink for now: it enforces the full
-// HTTP contract (size cap + schema validation) but discards accepted bodies
-// until the real storage sink (scrub + encrypt + R2) lands in #8/#9.
-func New() http.Handler {
+// sink is the storage backend for accepted reports (scrub + encrypt + R2, #9).
+// It is injected so the deployed Worker supplies the real R2/Secrets-Store sink
+// while cmd/devserver and tests supply an in-memory one. A nil sink defaults to
+// ingest.NopSink, which enforces the full HTTP contract but discards bodies.
+func New(sink ingest.Sink) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
-	mux.Handle("/v1/reports", ingest.NewHandler(ingest.NopSink{}))
+	mux.Handle("/v1/reports", ingest.NewHandler(sink))
 	mux.HandleFunc("/", root)
 	return mux
 }
