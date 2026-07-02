@@ -64,7 +64,17 @@ This runs the exact handler the deployed Worker uses, minus the Workers runtime.
 ### Build & run the real Worker (requires TinyGo)
 
 Node tooling is managed with **pnpm**; wrangler is a dev dependency. The Wasm
-build uses [TinyGo](https://tinygo.org) 0.35.0+.
+build uses [TinyGo](https://tinygo.org) 0.41.1 on the Go 1.26 toolchain.
+
+> **Temporary toolchain patch.** TinyGo 0.41.1 and earlier vendor a `net/http`
+> js/wasm overlay (`tinygo-org/net@e54965e`) that fails to compile against Go
+> 1.25+/1.26 with `t.roundTrip undefined` (see
+> [tinygo-org/tinygo#5467](https://github.com/tinygo-org/tinygo/issues/5467)).
+> CI applies the exact upstream fix (`tinygo-org/net@1026408a`, checked in as
+> `.ci/tinygo-net-roundtrip.patch`) to the installed TinyGo before building.
+> Building locally on Go 1.26 needs the same one-file patch until a TinyGo
+> release later than 0.41.1 ships it, at which point the patch and the CI step
+> are removed (tracked in #26).
 
 ```console
 pnpm install                 # install wrangler
