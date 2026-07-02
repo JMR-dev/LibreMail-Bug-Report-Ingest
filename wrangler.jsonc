@@ -41,5 +41,22 @@
       "store_id": "<store-id>",
       "secret_name": "bugreport-enc-keyring"
     }
-  ]
+  ],
+
+  // Cron Triggers for the weekly publish job (#13): "Friday 17:00 America/Chicago
+  // (Central), DST-correct". Cloudflare evaluates crons in UTC only and has no
+  // timezone support, and 17:00 Central is a different UTC hour depending on DST:
+  // 22:00 UTC during Central Daylight Time (CDT, UTC-5, summer) and 23:00 UTC
+  // during Central Standard Time (CST, UTC-6, winter). A single UTC cron therefore
+  // cannot express it, so we register BOTH candidate Friday UTC hours below. The
+  // Worker's scheduled handler (worker/scheduled_wasm.go -> internal/schedule)
+  // gates each fire on the real America/Chicago rule, so exactly one of the two
+  // does the publish work on any given Friday and the other is a no-op. This makes
+  // the trigger fire at 17:00 Central year-round with no manual DST maintenance.
+  "triggers": {
+    "crons": [
+      "0 22 * * 5", // Fridays 22:00 UTC == 17:00 Central during CDT (summer)
+      "0 23 * * 5" //  Fridays 23:00 UTC == 17:00 Central during CST (winter)
+    ]
+  }
 }
