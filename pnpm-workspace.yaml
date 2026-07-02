@@ -9,3 +9,14 @@ allowBuilds:
   protobufjs: true
   sharp: true
   workerd: true
+
+# Force patched versions of vulnerable transitive dev-tooling deps (see #36).
+# form-data <4.0.6 has a HIGH CRLF-injection advisory; uuid <11.1.1 has a MEDIUM
+# buffer-bounds advisory. Both are pulled in transitively by wrangler /
+# @usebruno/cli and are dev-only (not in the Go/Wasm Worker). pnpm 11 no longer
+# reads the "pnpm" field in package.json, so overrides live here alongside the
+# build-approval config. Values are quoted because a leading ">" is a YAML
+# block-scalar indicator.
+overrides:
+  form-data: '>=4.0.6'
+  uuid: '>=11.1.1'
