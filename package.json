@@ -7,9 +7,11 @@
     "build": "go run github.com/syumai/workers/cmd/workers-assets-gen && tinygo build -o ./build/app.wasm -target wasm -no-debug ./worker",
     "dev": "wrangler dev",
     "start": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test:api": "cd api-tests && bru run --env local"
   },
   "devDependencies": {
+    "@usebruno/cli": "^3.5.0",
     "wrangler": "^4.106.0"
   }
 }

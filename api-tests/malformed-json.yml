@@ -1,0 +1,27 @@
+info:
+  name: 400 - malformed JSON is rejected
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/reports"
+  headers:
+    - name: Content-Type
+      value: application/json
+  # Sent as a raw text body (so the bytes are transmitted verbatim) but declared
+  # as application/json, so the endpoint tries to parse it and fails -> 400.
+  body:
+    type: text
+    data: '{"appVersion": "1.0.0", "platform": "android", "report":'
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("malformed JSON returns 400", function () {
+          expect(res.getStatus()).to.equal(400);
+        });
+        test("400 body carries a generic error string", function () {
+          expect(res.getBody().error).to.be.a("string");
+        });

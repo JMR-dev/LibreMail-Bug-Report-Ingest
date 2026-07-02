@@ -1,0 +1,33 @@
+info:
+  name: 413 - oversized report is rejected
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/reports"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: "{{oversizedReport}}"
+
+runtime:
+  scripts:
+    # Build a payload larger than the 256 KiB cap at run time so this file stays
+    # small. The before-request script runs before body interpolation, so the
+    # {{oversizedReport}} placeholder above is replaced with this ~300 KiB body.
+    - type: before-request
+      code: |-
+        const filler = "x".repeat(300 * 1024); // 300 KiB, over the 256 KiB cap
+        bru.setVar("oversizedReport", JSON.stringify({
+          appVersion: "1.0.0",
+          platform: "android",
+          report: filler
+        }));
+    - type: tests
+      code: |-
+        test("body larger than 256 KiB returns 413", function () {
+          expect(res.getStatus()).to.equal(413);
+        });
