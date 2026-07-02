@@ -66,11 +66,16 @@ func (s *R2Store) List(_ context.Context, prefix string) ([]string, error) {
 	var keys []string
 	cursor := ""
 	for {
-		opts := map[string]any{"prefix": prefix, "limit": 1000}
+		// Build the list options object with Object/Set (the idiom the syumai R2
+		// helpers use) rather than js.ValueOf(map), which keeps the JS-interop
+		// surface identical to the rest of the wasm build.
+		opts := js.Global().Get("Object").New()
+		opts.Set("prefix", prefix)
+		opts.Set("limit", 1000)
 		if cursor != "" {
-			opts["cursor"] = cursor
+			opts.Set("cursor", cursor)
 		}
-		res, err := await(s.binding.Call("list", js.ValueOf(opts)))
+		res, err := await(s.binding.Call("list", opts))
 		if err != nil {
 			return nil, err
 		}
