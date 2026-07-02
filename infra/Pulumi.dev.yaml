@@ -12,8 +12,20 @@ config:
 
   # --- Program config (namespace = project name from Pulumi.yaml) ---
   libremail-bug-report-ingest-infra:cloudflareAccountId: REPLACE_ME_CLOUDFLARE_ACCOUNT_ID
+  # Cloudflare Secrets Store id holding the Worker's secrets (encryption keyring,
+  # admin token, GitHub token, OTLP headers). Account-specific; not itself secret.
+  libremail-bug-report-ingest-infra:secretsStoreId: REPLACE_ME_CLOUDFLARE_SECRETS_STORE_ID
   libremail-bug-report-ingest-infra:workerName: libremail-bug-report-ingest
   libremail-bug-report-ingest-infra:workerCompatibilityDate: "2025-06-01"
+  # Built Worker artifact (../build/worker.mjs from `pnpm run build`). Leave UNSET
+  # here: the CD workflow (.github/workflows/deploy.yml) injects it at deploy time
+  # via config-map so `pulumi preview` without a build still uses the placeholder.
+  # libremail-bug-report-ingest-infra:workerScriptPath: ../build/worker.mjs
+  # Plain (non-secret) Worker vars — mirror wrangler.jsonc "vars".
+  libremail-bug-report-ingest-infra:githubRepo: JMR-dev/LibreMail
+  # OTLP endpoint EMPTY disables telemetry until a collector is chosen (#17).
+  libremail-bug-report-ingest-infra:otelExporterOtlpEndpoint: ""
+  libremail-bug-report-ingest-infra:otelServiceName: libremail-bug-report-ingest
   libremail-bug-report-ingest-infra:r2BucketName: libremail-bug-reports-dev
   # R2 location hint (optional). One of: apac, eeur, enam, weur, wnam, oc.
   libremail-bug-report-ingest-infra:r2BucketLocation: enam

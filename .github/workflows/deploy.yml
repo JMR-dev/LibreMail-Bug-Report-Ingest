@@ -1,0 +1,144 @@
+# Continuous deployment for the LibreMail bug-report ingest Worker + infra.
+#
+# MANUAL ONLY: this workflow never runs on push/PR. A maintainer triggers it from
+# the Actions tab (workflow_dispatch), choosing a stack. It builds the TinyGo/Wasm
+# Worker end to end (same setup as ci.yml) and then runs `pulumi up` over the
+# infra/ program to deploy the Worker (with its R2 + Secrets Store + var bindings
+# and Cron Triggers), the R2 bucket, and the Google Cloud DNS record.
+#
+# It is gated to the `production` GitHub Actions environment, so that environment's
+# secrets and any required-reviewer / branch protection rules apply, and to the
+# `main` branch (a guard step fails the run otherwise). Deploying is real and
+# billable, hence manual + environment-gated + maintainer-run-from-main.
+#
+# Supply-chain note: every action (first- and third-party) is pinned to a full
+# commit SHA with a trailing "# vX.Y.Z" comment, matching ci.yml / autoupdate.yml.
+#
+# Secrets/config the maintainer must set BEFORE the first deploy (see infra/README.md):
+#   production environment SECRETS (Settings > Environments > production):
+#     - PULUMI_ACCESS_TOKEN     Pulumi Cloud access token (state backend). For a
+#                               self-managed backend instead, set the `cloud-url`
+#                               input + a PULUMI_CONFIG_PASSPHRASE secret.
+#     - CLOUDFLARE_API_TOKEN    Cloudflare token scoped to Workers Scripts + R2 (+ Cron).
+#     - CLOUDFLARE_ACCOUNT_ID   Cloudflare account id (also set as stack config).
+#     - GOOGLE_CREDENTIALS      GCP service-account JSON with Cloud DNS admin on the zone.
+#   stack CONFIG (infra/Pulumi.<stack>.yaml — replace every REPLACE_ME_* first):
+#     cloudflareAccountId, secretsStoreId, dnsManagedZone, dnsRecordName,
+#     dnsRecordTarget, gcp:project (+ optional r2/otel/dns overrides).
+#   Cloudflare Secrets Store must already hold the four secret values
+#   (bugreport-enc-keyring, bugreport-admin-token, github-token,
+#   otel-exporter-otlp-headers) under the configured secretsStoreId.
+
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Pulumi stack to deploy'
+        required: true
+        default: prod
+        type: choice
+        options:
+          - prod
+          - dev
+
+# Least privilege: the job only needs to read the repo out; Pulumi auth is via env.
+permissions:
+  contents: read
+
+# Never run two deploys of the same stack concurrently; do not cancel an in-flight
+# deploy (interrupting `pulumi up` can leave a stack mid-update).
+concurrency:
+  group: cd-${{ github.event.inputs.stack }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    # Gate on the production environment so its secrets + protection rules apply.
+    environment: production
+    steps:
+      # Deploys must be cut from main. workflow_dispatch lets a user pick any ref,
+      # so fail loudly if this was launched from a non-main branch.
+      - name: Guard - deploy only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Deploy must be run from the 'main' branch (got '${{ github.ref }}')."
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Mirror ci.yml: cache both the root and infra/ module go.sum (infra pulls the
+      # heavy Pulumi SDKs) so warm runs restore deps instead of re-downloading.
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26'
+          cache-dependency-path: |
+            go.sum
+            infra/go.sum
+
+      # TinyGo builds the Wasm Worker (pnpm run build). Same version as ci.yml.
+      - name: Set up TinyGo
+        uses: acifani/setup-tinygo@dd8a7075d951a7595b2ef2123ed0ab1af0c13e56 # v3.0.0
+        with:
+          tinygo-version: '0.41.1'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: '11'
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '26'
+          cache: pnpm
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      # TEMPORARY (tracking #26; tinygo-org/tinygo#5467): identical to ci.yml. TinyGo
+      # 0.41.1 vendors a net/http js/wasm overlay that fails to compile on Go 1.26;
+      # apply the exact upstream fix to the installed TinyGo source before building.
+      # git apply exits non-zero (failing loudly) if the source has drifted.
+      - name: Patch TinyGo net/http (temporary)
+        run: |
+          patch_file="$PWD/.ci/tinygo-net-roundtrip.patch"
+          tinygoroot="$(tinygo env TINYGOROOT)"
+          echo "Applying $patch_file to $tinygoroot/src/net/http/roundtrip_js.go"
+          git -C "$tinygoroot" apply --verbose "$patch_file" || {
+            echo "::error::TinyGo net/http patch did not apply cleanly; TinyGo source may have changed. Update or remove .ci/tinygo-net-roundtrip.patch (see #26)."
+            exit 1
+          }
+
+      # Produce build/worker.mjs (ES-module shim) + build/app.wasm. The infra program
+      # uploads the shim as the Worker's main module via the workerScriptPath config
+      # injected below.
+      - name: Build Wasm Worker
+        run: pnpm run build
+
+      # Install the Pulumi CLI and run `pulumi up` over infra/. config-map injects the
+      # freshly built artifact path so the WorkersScript uploads the real module
+      # (ContentFile) instead of the placeholder. Provider + backend credentials come
+      # from the production environment secrets below; nothing secret is committed.
+      - name: Pulumi up
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        with:
+          command: up
+          stack-name: ${{ github.event.inputs.stack }}
+          work-dir: infra
+          upsert: false
+          config-map: '{ "libremail-bug-report-ingest-infra:workerScriptPath": { value: "../build/worker.mjs", secret: false } }'
+        env:
+          # Pulumi state backend (Pulumi Cloud). For a self-managed backend, drop this,
+          # set the action's `cloud-url` input, and add PULUMI_CONFIG_PASSPHRASE.
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          # Cloudflare provider (Workers + R2 + Cron Triggers).
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # GCP provider (Cloud DNS record).
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
