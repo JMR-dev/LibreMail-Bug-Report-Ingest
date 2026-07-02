@@ -46,8 +46,19 @@ func TestSealOpenRoundtrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seal(%d bytes): %v", len(pt), err)
 		}
-		if len(pt) > 0 && bytes.Contains(sealed, pt) {
-			t.Errorf("sealed frame contains the plaintext verbatim (len %d)", len(pt))
+		// The sealed frame is never the bare plaintext: it always prepends the
+		// 7-byte header + 12-byte nonce and appends the 16-byte GCM tag, so it
+		// differs from the plaintext in both length and leading bytes. This is
+		// a deterministic check.
+		//
+		// We deliberately do NOT scan the frame for the plaintext byte-by-byte
+		// (the old `bytes.Contains(sealed, pt)`): with a random nonce and
+		// ciphertext, a 1-byte plaintext coincides with some frame byte
+		// ~11% of the time, which made this test flaky (issue #41).
+		// Verbatim-leak coverage lives in TestNoPlaintextLeak, which uses a
+		// multi-byte marker where a chance match is negligible.
+		if bytes.Equal(sealed, pt) {
+			t.Errorf("sealed frame equals the plaintext (len %d)", len(pt))
 		}
 		got, err := Open(kr, sealed)
 		if err != nil {
