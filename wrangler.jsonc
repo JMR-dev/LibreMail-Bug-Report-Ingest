@@ -15,5 +15,31 @@
   // Requires TinyGo locally; TinyGo is installed in CI.
   "build": {
     "command": "pnpm run build"
-  }
+  },
+
+  // R2 bucket for the encrypted-at-rest bug-report objects (ADR #5 / issue #9).
+  // The Worker encrypts each scrubbed report with AES-256-GCM before writing, so
+  // only ciphertext is ever stored here. "binding" is the JS var the Worker code
+  // reads (internal/storage.BucketBinding); "bucket_name" matches the bucket
+  // provisioned by infra/ (defaultR2BucketName = "libremail-bug-reports").
+  "r2_buckets": [
+    {
+      "binding": "REPORTS_BUCKET",
+      "bucket_name": "libremail-bug-reports"
+    }
+  ],
+
+  // Cloudflare Secrets Store secret holding the versioned encryption keyring
+  // (ADR #5, Key custody): a single JSON secret {active, keys{ver: base64-32B}}.
+  // "binding" is read at runtime via env.BUGREPORT_ENC_KEYRING.get()
+  // (internal/storage.KeyringBinding). Replace "<store-id>" with the account's
+  // Secrets Store id at deploy time; it is not needed for `pnpm run build`
+  // (Wasm compile) or the devserver, so CI does not require it.
+  "secrets_store_secrets": [
+    {
+      "binding": "BUGREPORT_ENC_KEYRING",
+      "store_id": "<store-id>",
+      "secret_name": "bugreport-enc-keyring"
+    }
+  ]
 }

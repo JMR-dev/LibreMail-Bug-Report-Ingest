@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/ingest"
 )
 
 // doRequest runs a single request through the handler and returns the recorder.
@@ -12,7 +15,7 @@ func doRequest(t *testing.T, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
 	rec := httptest.NewRecorder()
-	New().ServeHTTP(rec, req)
+	New(nil).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -68,6 +71,26 @@ func TestUnknownPathReturns404(t *testing.T) {
 	got := decode(t, rec)
 	if got.Status != "error" {
 		t.Errorf("404 status field = %q, want error", got.Status)
+	}
+}
+
+// TestReportsRoutedToInjectedSink proves New wires the injected sink into
+// POST /v1/reports (the #9 storage seam), returning 202 and storing the report.
+func TestReportsRoutedToInjectedSink(t *testing.T) {
+	sink := &ingest.MemorySink{}
+	h := New(sink)
+
+	body := `{"appVersion":"1.0.0","platform":"android","report":"boom"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("POST /v1/reports status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if sink.Len() != 1 {
+		t.Fatalf("injected sink stored %d reports, want 1", sink.Len())
 	}
 }
 
