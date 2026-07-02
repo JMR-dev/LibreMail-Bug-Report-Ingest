@@ -1,0 +1,34 @@
+# Automatically keep open PR branches up to date with main.
+#
+# Whenever a commit lands on main (typically when a PR merges), the
+# chinthakagodawita/autoupdate action merges the latest main into every open PR
+# that targets main, so PR branches don't drift out of date.
+#
+# Known trade-off: the update push is made using the default GITHUB_TOKEN, and
+# pushes made with GITHUB_TOKEN do NOT re-trigger downstream workflow runs. So
+# CI will not automatically re-run purely as a result of an autoupdate push --
+# a manual push or a re-run is needed to re-trigger checks on the updated branch.
+
+name: Autoupdate PR branches
+
+on:
+  push:
+    branches: [main]
+
+# Minimal permissions needed to update open PR branches.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  autoupdate:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a specific commit SHA (supply-chain safety); comment tracks the
+      # human-readable release it corresponds to.
+      - name: Autoupdate open PRs
+        uses: chinthakagodawita/autoupdate@0707656cd062a3b0cf8fa9b2cda1d1404d74437e # v1.7.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Update all open PRs targeting the pushed branch.
+          PR_FILTER: "all"
