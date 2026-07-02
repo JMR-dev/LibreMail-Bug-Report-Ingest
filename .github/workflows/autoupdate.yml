@@ -4,10 +4,11 @@
 # chinthakagodawita/autoupdate action merges the latest main into every open PR
 # that targets main, so PR branches don't drift out of date.
 #
-# Known trade-off: the update push is made using the default GITHUB_TOKEN, and
-# pushes made with GITHUB_TOKEN do NOT re-trigger downstream workflow runs. So
-# CI will not automatically re-run purely as a result of an autoupdate push --
-# a manual push or a re-run is needed to re-trigger checks on the updated branch.
+# The update push is authenticated with a PAT (STATUS_CHECKS_RETRIGGER_TOKEN,
+# sourced from the "production" GitHub Actions environment) instead of the default
+# GITHUB_TOKEN. Pushes made with GITHUB_TOKEN do NOT re-trigger downstream workflow
+# runs, whereas a PAT does -- so autoupdate's branch-update pushes DO re-trigger
+# status checks on the updated PR branch automatically.
 
 name: Autoupdate PR branches
 
@@ -23,12 +24,17 @@ permissions:
 jobs:
   autoupdate:
     runs-on: ubuntu-latest
+    # Required to read the STATUS_CHECKS_RETRIGGER_TOKEN secret, which is scoped
+    # to the "production" environment.
+    environment: production
     steps:
       # Pinned to a specific commit SHA (supply-chain safety); comment tracks the
       # human-readable release it corresponds to.
       - name: Autoupdate open PRs
         uses: chinthakagodawita/autoupdate@0707656cd062a3b0cf8fa9b2cda1d1404d74437e # v1.7.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action reads its token from the GITHUB_TOKEN env var; we feed it
+          # the PAT so its pushes re-trigger downstream status checks.
+          GITHUB_TOKEN: ${{ secrets.STATUS_CHECKS_RETRIGGER_TOKEN }}
           # Update all open PRs targeting the pushed branch.
           PR_FILTER: "all"
