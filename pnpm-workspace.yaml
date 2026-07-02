@@ -1,7 +1,11 @@
-# Approve build (postinstall) scripts for wrangler's toolchain deps.
-# These are first-party Cloudflare / well-known packages required by
-# `wrangler dev`/`deploy`; they are not needed for `go test` or the dev server.
+# Approve build (postinstall) scripts for dev-tooling deps.
+# esbuild/sharp/workerd are first-party Cloudflare / well-known packages required
+# by `wrangler dev`/`deploy`; protobufjs is a transitive dependency of
+# `@usebruno/cli` (the API-test runner). None are needed for `go test` or the dev
+# server. Without approving protobufjs, pnpm 11 exits non-zero on the ignored
+# build script, which would break CI's `pnpm install` and `pnpm exec`/`pnpm run`.
 allowBuilds:
   esbuild: true
+  protobufjs: true
   sharp: true
   workerd: true
