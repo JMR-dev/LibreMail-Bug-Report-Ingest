@@ -1,0 +1,4 @@
+# Keep CI-critical text files LF on every platform. .ci/*.patch is applied with
+# `git apply` against TinyGo's Unix (LF) source in CI, so it must never be
+# checked out with CRLF (which would make the patch fail to apply).
+*.patch text eol=lf
