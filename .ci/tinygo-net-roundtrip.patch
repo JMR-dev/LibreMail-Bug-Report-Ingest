@@ -1,0 +1,36 @@
+Temporary CI patch: fix the TinyGo net/http js/wasm build on Go 1.25/1.26.
+
+TinyGo <= 0.41.1 vendors github.com/tinygo-org/net at commit e54965e, whose
+http/roundtrip_js.go calls the private t.roundTrip fallback that no longer
+exists in Go 1.25+/1.26 net/http, so any wasm build importing net/http fails:
+
+    net/http/roundtrip_js.go: t.roundTrip undefined (type *Transport has no
+    field or method roundTrip, but does have method RoundTrip)
+
+This is the exact upstream fix tinygo-org/net@1026408a ("http: fix t.roundTrip
+undefined on js/wasm builds", whose parent is e54965e -- the commit TinyGo
+0.41.1 ships), applied to the installed TinyGo source in CI before the wasm
+build. The .patch is applied by the "Patch TinyGo net/http (temporary)" step
+in .github/workflows/ci.yml.
+
+TODO: remove this file AND that CI step once a TinyGo release > 0.41.1 ships
+the fix. It is already on TinyGo's dev branch (which pins tinygo-org/net@
+1026408a). Tracking: issue #26; upstream tinygo-org/tinygo#5467.
+
+diff --git a/src/net/http/roundtrip_js.go b/src/net/http/roundtrip_js.go
+--- a/src/net/http/roundtrip_js.go
++++ b/src/net/http/roundtrip_js.go
+@@ -68,9 +68,11 @@
+ 	// to fall back on the Fetch API, unless it's not available.
+ 
+ 	// TINYGO: Dial/DialTLS & DialContext/DialTLSContext are not present in tinygo Transport struct, therefore the
+-	// corresponding if statements were removed
++	// corresponding if statements were removed.
++	// TINYGO: t.roundTrip (the private fallback used by upstream Go) is not present in the TinyGo stub
++	// Transport, so return an error when the Fetch API is unavailable instead of calling it.
+ 	if jsFetchMissing || jsFetchDisabled {
+-		return t.roundTrip(req)
++		return nil, errors.New("net/http: Fetch API is not available and no fallback transport is implemented for js/wasm")
+ 	}
+ 
+ 	ac := js.Global().Get("AbortController")
