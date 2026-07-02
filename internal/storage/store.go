@@ -37,9 +37,16 @@ const (
 // ever handle already-encrypted frames.
 //
 //   - Put writes data (a sealed frame) at key, overwriting any existing object.
-//   - Get reads the bytes back, or returns ErrNotFound. Get exists mainly for the
-//     future publish job (#35) and for tests; the ingest path is write-only.
+//   - Get reads the bytes back, or returns ErrNotFound. Get exists for the publish
+//     job (#15) and for tests; the ingest path is write-only.
+//   - List returns the keys whose names start with prefix, in sorted (ascending)
+//     order. It backs the lifecycle "list pending" query (#10/#13); implementations
+//     must page through the whole result set, not just the first batch.
+//   - Delete removes the object at key. Deleting a key that does not exist is not
+//     an error (idempotent), which is what makes a status transition safe to retry.
 type ObjectStore interface {
 	Put(ctx context.Context, key string, data []byte) error
 	Get(ctx context.Context, key string) ([]byte, error)
+	List(ctx context.Context, prefix string) ([]string, error)
+	Delete(ctx context.Context, key string) error
 }

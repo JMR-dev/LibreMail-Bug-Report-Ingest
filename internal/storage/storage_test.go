@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -86,13 +87,14 @@ func TestSinkFullPath(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
-	// Exactly one object, under a reports/ key.
+	// Exactly one object, and new reports enter the lifecycle as pending, so the
+	// key lives under the pending status prefix (#10).
 	keys := store.Keys()
 	if len(keys) != 1 {
 		t.Fatalf("stored %d objects, want 1", len(keys))
 	}
-	if !strings.HasPrefix(keys[0], objectKeyPrefix) {
-		t.Errorf("object key %q lacks prefix %q", keys[0], objectKeyPrefix)
+	if want := StatusPrefix(StatusPending); !strings.HasPrefix(keys[0], want) {
+		t.Errorf("object key %q lacks pending prefix %q", keys[0], want)
 	}
 
 	stored, err := store.Get(ctx, keys[0])
@@ -164,6 +166,12 @@ func (failingStore) Put(context.Context, string, []byte) error {
 func (failingStore) Get(context.Context, string) ([]byte, error) {
 	return nil, ErrNotFound
 }
+func (failingStore) List(context.Context, string) ([]string, error) {
+	return nil, errors.New("backend down")
+}
+func (failingStore) Delete(context.Context, string) error {
+	return errors.New("backend down")
+}
 
 func TestSinkStorePutError(t *testing.T) {
 	sink := NewSink(failingStore{}, mustKeyring(t))
@@ -195,5 +203,57 @@ func TestSinkWithKeyFunc(t *testing.T) {
 	}
 	if _, err := store.Get(ctx, "reports/fixed"); err != nil {
 		t.Errorf("expected object at fixed key: %v", err)
+	}
+}
+
+// TestStatusKeyLayout pins the status key scheme the lifecycle layer relies on:
+// disjoint, trailing-slashed status prefixes so a prefix List of one status can
+// never match another.
+func TestStatusKeyLayout(t *testing.T) {
+	if got := ReportKey(StatusPending, "abc"); got != "reports/pending/abc" {
+		t.Errorf("ReportKey(pending, abc) = %q, want reports/pending/abc", got)
+	}
+	// "reports/pending/" must not be a prefix of another status's keys.
+	if strings.HasPrefix(ReportKey(StatusPublished, "x"), StatusPrefix(StatusPending)) {
+		t.Error("pending prefix wrongly matches a published key")
+	}
+	if strings.HasPrefix(ReportKey(StatusRemoved, "x"), StatusPrefix(StatusPending)) {
+		t.Error("pending prefix wrongly matches a removed key")
+	}
+}
+
+func TestMemoryStoreListAndDelete(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryStore()
+	seed := map[string][]byte{
+		"reports/pending/a":   []byte("1"),
+		"reports/pending/b":   []byte("2"),
+		"reports/published/c": []byte("3"),
+		"reports/removed/d":   []byte("4"),
+	}
+	for k, v := range seed {
+		if err := m.Put(ctx, k, v); err != nil {
+			t.Fatalf("Put %s: %v", k, err)
+		}
+	}
+
+	got, err := m.List(ctx, "reports/pending/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{"reports/pending/a", "reports/pending/b"}
+	if !slices.Equal(got, want) {
+		t.Errorf("List(pending) = %v, want %v (must be exact and sorted)", got, want)
+	}
+
+	// Delete is idempotent: deleting a present then an absent key both succeed.
+	if err := m.Delete(ctx, "reports/pending/a"); err != nil {
+		t.Fatalf("Delete present: %v", err)
+	}
+	if err := m.Delete(ctx, "reports/pending/a"); err != nil {
+		t.Fatalf("Delete absent (must be a no-op): %v", err)
+	}
+	if got, _ := m.List(ctx, "reports/pending/"); !slices.Equal(got, []string{"reports/pending/b"}) {
+		t.Errorf("after delete, List(pending) = %v, want [reports/pending/b]", got)
 	}
 }

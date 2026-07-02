@@ -12,9 +12,6 @@ import (
 	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/scrub"
 )
 
-// objectKeyPrefix namespaces report objects within the bucket.
-const objectKeyPrefix = "reports/"
-
 // Sink is the real ingest.Sink. For each accepted report it:
 //
 //  1. scrubs the raw body (best-effort PII redaction, #8);
@@ -65,14 +62,22 @@ func (s *Sink) Store(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-// defaultObjectKey builds a unique object key: a UTC timestamp (for rough
+// defaultObjectKey builds the key for a freshly accepted report. Reports enter
+// the lifecycle (#10) as pending, so the key lives under the pending status
+// prefix: reports/pending/<id>. The id is a UTC timestamp (for rough
 // lexicographic ordering, convenient for the weekly publish job) plus 80 bits of
-// CSPRNG randomness (so keys are unguessable and collision-free within a second).
+// CSPRNG randomness (so ids are unguessable and collision-free within a second),
+// and is stable as the report later transitions to published/removed.
 func defaultObjectKey() string {
+	return ReportKey(StatusPending, newReportID())
+}
+
+// newReportID mints a stable, unguessable report id: <utc-ts>-<80-bit-rand>.
+func newReportID() string {
 	var b [10]byte
 	_, _ = rand.Read(b[:])
 	ts := time.Now().UTC().Format("20060102T150405")
-	return objectKeyPrefix + ts + "-" + hex.EncodeToString(b[:])
+	return ts + "-" + hex.EncodeToString(b[:])
 }
 
 // Sink satisfies the ingest storage seam.
