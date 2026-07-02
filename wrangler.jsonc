@@ -29,12 +29,20 @@
     }
   ],
 
-  // Cloudflare Secrets Store secret holding the versioned encryption keyring
-  // (ADR #5, Key custody): a single JSON secret {active, keys{ver: base64-32B}}.
-  // "binding" is read at runtime via env.BUGREPORT_ENC_KEYRING.get()
-  // (internal/storage.KeyringBinding). Replace "<store-id>" with the account's
-  // Secrets Store id at deploy time; it is not needed for `pnpm run build`
-  // (Wasm compile) or the devserver, so CI does not require it.
+  // Cloudflare Secrets Store secrets. "binding" is the JS var the Worker reads at
+  // runtime via env.<binding>.get(). Replace "<store-id>" with the account's
+  // Secrets Store id at deploy time; secrets are not needed for `pnpm run build`
+  // (Wasm compile) or the devserver, so CI does not require them.
+  //
+  //   - BUGREPORT_ENC_KEYRING (ADR #5, Key custody): the versioned encryption
+  //     keyring, a single JSON secret {active, keys{ver: base64-32B}}, read via
+  //     internal/storage.KeyringBinding.
+  //   - ADMIN_TOKEN (#11): the maintainer admin API shared secret (see the
+  //     detailed note on its entry below).
+  //   - GITHUB_TOKEN (#14): the token the weekly publish job authenticates to the
+  //     GitHub API with to create issues on the target repo. Least privilege: a
+  //     fine-grained PAT with Issues: read/write (and Metadata: read) on
+  //     JMR-dev/LibreMail. Read via worker/scheduled_wasm.go githubTokenBinding.
   "secrets_store_secrets": [
     {
       "binding": "BUGREPORT_ENC_KEYRING",
@@ -53,8 +61,21 @@
       "binding": "ADMIN_TOKEN",
       "store_id": "<store-id>",
       "secret_name": "bugreport-admin-token"
+    },
+    {
+      "binding": "GITHUB_TOKEN",
+      "store_id": "<store-id>",
+      "secret_name": "github-token"
     }
   ],
+
+  // Plain (non-secret) vars. GITHUB_REPO is the "owner/repo" the weekly publish
+  // job (#14) files issues on; it is configurable here without a code change and
+  // defaults to "JMR-dev/LibreMail" in worker/scheduled_wasm.go if unset. Read via
+  // cloudflare.Getenv(GITHUB_REPO).
+  "vars": {
+    "GITHUB_REPO": "JMR-dev/LibreMail"
+  },
 
   // Cron Triggers for the weekly publish job (#13): "Friday 17:00 America/Chicago
   // (Central), DST-correct". Cloudflare evaluates crons in UTC only and has no
