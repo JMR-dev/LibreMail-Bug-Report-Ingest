@@ -1,0 +1,33 @@
+info:
+  name: 202 - valid report is accepted
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/reports"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "appVersion": "1.4.2 (142)",
+        "platform": "android",
+        "osVersion": "Android 14",
+        "device": "Pixel 7",
+        "clientTimestamp": "2026-07-02T12:34:56Z",
+        "report": "NullPointerException in SyncService\n at line 42\n<attached logs>"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("valid JSON report within the size limit returns 202", function () {
+          expect(res.getStatus()).to.equal(202);
+        });
+        test("202 body reports accepted status", function () {
+          expect(res.getBody().status).to.equal("accepted");
+        });
