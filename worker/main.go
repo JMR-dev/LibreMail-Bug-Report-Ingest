@@ -21,5 +21,9 @@ func main() {
 	// The real storage Sink (#9): scrub -> AES-256-GCM encrypt -> R2 put, with the
 	// keyring loaded from Cloudflare Secrets Store on first request. Bindings
 	// (REPORTS_BUCKET, BUGREPORT_ENC_KEYRING) are declared in wrangler.jsonc.
-	workers.Serve(handler.New(storage.NewWorkerSink()))
+	//
+	// The maintainer admin API (#11) is wired with workerAdminBackend, which reads
+	// the admin shared secret (ADMIN_TOKEN) from Secrets Store and drives the
+	// lifecycle Manager over R2 per request (see admin.go).
+	workers.Serve(handler.New(storage.NewWorkerSink(), workerAdminBackend{}))
 }

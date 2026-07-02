@@ -40,6 +40,19 @@
       "binding": "BUGREPORT_ENC_KEYRING",
       "store_id": "<store-id>",
       "secret_name": "bugreport-enc-keyring"
+    },
+    // Maintainer admin API shared secret (issue #11). The Worker reads it per
+    // request via env.ADMIN_TOKEN.get() (internal/storage.AdminTokenBinding) to
+    // authenticate GET /v1/admin/reports and POST /v1/admin/reports/{id}/remove
+    // with a constant-time-compared Bearer token. Fail-closed: if this binding is
+    // absent or empty the admin routes reject every request (401/503). Replace
+    // "<store-id>" with the account's Secrets Store id at deploy time; not needed
+    // for `pnpm run build` (Wasm compile) or the devserver (which uses ADMIN_TOKEN
+    // from the environment instead).
+    {
+      "binding": "ADMIN_TOKEN",
+      "store_id": "<store-id>",
+      "secret_name": "bugreport-admin-token"
     }
   ],
 

@@ -1,0 +1,25 @@
+info:
+  name: "admin: authenticated remove of a pending report"
+  # POST /v1/admin/reports/{id}/remove with a valid Bearer token transitions the
+  # report pending -> removed (#10), excluding it from the next weekly publish.
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/reports/{{removeId}}/remove"
+  headers:
+    - name: Authorization
+      value: "Bearer {{adminToken}}"
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("authenticated remove returns 200", function () {
+          expect(res.getStatus()).to.equal(200);
+        });
+        test("body confirms the removed id", function () {
+          expect(res.getBody().status).to.equal("removed");
+          expect(res.getBody().id).to.equal(bru.getVar("removeId"));
+        });

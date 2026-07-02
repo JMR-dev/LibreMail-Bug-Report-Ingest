@@ -1,0 +1,20 @@
+info:
+  name: "admin: wrong token is rejected (401)"
+  # A well-formed Bearer header carrying the wrong secret -> rejected.
+  type: http
+  seq: 11
+
+http:
+  method: GET
+  url: "{{baseUrl}}/v1/admin/reports"
+  headers:
+    - name: Authorization
+      value: "Bearer not-the-admin-token"
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("a request with the wrong bearer token returns 401", function () {
+          expect(res.getStatus()).to.equal(401);
+        });

@@ -31,6 +31,10 @@ const (
 	// KeyringBinding is the Cloudflare Secrets Store binding holding the JSON
 	// keyring secret, named per ADR #5.
 	KeyringBinding = "BUGREPORT_ENC_KEYRING"
+	// AdminTokenBinding is the Cloudflare Secrets Store binding holding the
+	// maintainer admin API shared secret (#11). Read per request via ReadSecret;
+	// never logged or echoed.
+	AdminTokenBinding = "ADMIN_TOKEN"
 )
 
 // ObjectStore is the seam for the opaque object backend. Implementations only

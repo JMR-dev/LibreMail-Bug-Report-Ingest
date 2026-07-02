@@ -15,7 +15,7 @@ func doRequest(t *testing.T, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
 	rec := httptest.NewRecorder()
-	New(nil).ServeHTTP(rec, req)
+	New(nil, nil).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -78,7 +78,7 @@ func TestUnknownPathReturns404(t *testing.T) {
 // POST /v1/reports (the #9 storage seam), returning 202 and storing the report.
 func TestReportsRoutedToInjectedSink(t *testing.T) {
 	sink := &ingest.MemorySink{}
-	h := New(sink)
+	h := New(sink, nil)
 
 	body := `{"appVersion":"1.0.0","platform":"android","report":"boom"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/reports", strings.NewReader(body))

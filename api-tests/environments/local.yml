@@ -3,3 +3,9 @@ name: local
 variables:
   - name: baseUrl
     value: http://localhost:8787
+  # Shared secret for the maintainer admin API (#11). The dev server must be
+  # started with ADMIN_TOKEN set to this same value (see package.json
+  # "test:api"): `ADMIN_TOKEN=local-dev-admin-token go run ./cmd/devserver`.
+  # This is a throwaway local-only token, never a production secret.
+  - name: adminToken
+    value: local-dev-admin-token
