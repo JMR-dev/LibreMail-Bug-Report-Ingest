@@ -84,8 +84,10 @@ func runWeeklyTrigger(ctx context.Context) error {
 
 	// schedule.Run re-checks the gate (open here) and hands the pending ids to the
 	// publisher, which decrypts, formats, and creates one labeled GitHub issue per
-	// report. Cross-run de-dup (marking reports published) is #15's job, wired via
-	// the publisher's onPublished hook; #14 leaves that hook at its default no-op.
+	// report. Cross-run de-dup is wired here (#15): the publisher's onPublished hook
+	// calls lifecycle.MarkPublished on each confirmed-201 publish (see buildPublish),
+	// so a report that becomes an issue leaves the pending set and the next run skips
+	// it, while a report that failed to publish stays pending and is retried.
 	if _, err := schedule.Run(ctx, event.ScheduledTime, manager, publisher); err != nil {
 		return err
 	}
@@ -129,7 +131,9 @@ func buildPublish(_ context.Context) (*lifecycle.Manager, *publish.Publisher, er
 	}
 
 	client := publish.NewClient(string(tokenRaw), owner, name)
-	// onPublished is left at its default no-op: #15 wires it to
-	// lifecycle.MarkPublished to complete cross-run de-duplication.
-	return manager, publish.New(client, keyring, manager), nil
+	// #15: wire the post-publish hook to the same Manager's MarkPublished, so each
+	// confirmed-201 publish immediately transitions that report to published and the
+	// next run's ListPending no longer returns it (cross-run de-dup). The one Manager
+	// instance is both the pending getter and the marker.
+	return manager, publish.New(client, keyring, manager, publish.WithMarkPublished(manager)), nil
 }
