@@ -1,0 +1,32 @@
+info:
+  name: "admin: seed a pending report to review"
+  # Seeds one pending report so the admin list/remove flow below is self-contained
+  # (it does not depend on the earlier ingest contract tests having run first).
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/reports"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "appVersion": "1.4.2 (142)",
+        "platform": "android",
+        "osVersion": "Android 14",
+        "device": "Pixel 7",
+        "clientTimestamp": "2026-07-02T12:34:56Z",
+        "report": "seed report for the admin review/removal flow (#11)"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("seed report is accepted (202)", function () {
+          expect(res.getStatus()).to.equal(202);
+        });

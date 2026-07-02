@@ -1,0 +1,20 @@
+info:
+  name: "admin: missing token is rejected (401)"
+  # No Authorization header -> the admin API rejects the request.
+  type: http
+  seq: 10
+
+http:
+  method: GET
+  url: "{{baseUrl}}/v1/admin/reports"
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("a request with no bearer token returns 401", function () {
+          expect(res.getStatus()).to.equal(401);
+        });
+        test("401 advertises the Bearer challenge", function () {
+          expect(res.getHeader("www-authenticate")).to.equal("Bearer");
+        });

@@ -78,6 +78,14 @@ func (s *WorkerSink) loadKeyring() (*crypto.Keyring, error) {
 	return kr, nil
 }
 
+// ReadSecret reads a Cloudflare Secrets Store secret by binding name, for use
+// outside this package (e.g. the Worker admin backend reading AdminTokenBinding,
+// #11). Like getSecret it must be called within a request handler, and the value
+// must never be logged or echoed. It errors if the binding is unbound or empty.
+func ReadSecret(binding string) ([]byte, error) {
+	return getSecret(binding)
+}
+
 // getSecret reads a Cloudflare Secrets Store secret via `await binding.get()`.
 // The returned value must never be logged or echoed (ADR #5, Key custody).
 func getSecret(binding string) ([]byte, error) {

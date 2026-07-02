@@ -20,21 +20,34 @@ const serviceName = "libremail-bug-report-ingest"
 
 // New returns an http.Handler serving the ingest Worker's endpoints:
 //
-//	GET  /            -> 200, JSON service/status/message
-//	GET  /healthz     -> 200, JSON {"status":"ok"}
-//	POST /v1/reports  -> 202 on accept; 400/413/415/405/503 per the ingest contract
+//	GET    /                              -> 200, JSON service/status/message
+//	GET    /healthz                       -> 200, JSON {"status":"ok"}
+//	POST   /v1/reports                    -> 202 on accept; 400/413/415/405/503 per the ingest contract
+//	GET    /v1/admin/reports              -> 200 list of pending report ids (authenticated, #11)
+//	POST   /v1/admin/reports/{id}/remove  -> 200 remove a pending report (authenticated, #11)
+//	DELETE /v1/admin/reports/{id}         -> 200 remove a pending report (authenticated alias, #11)
 //
 // Any other path returns 404. On the health/hello endpoints any non-GET method
-// returns 405; on /v1/reports any non-POST method returns 405 (Allow: POST).
+// returns 405; on /v1/reports any non-POST method returns 405 (Allow: POST); on
+// the admin routes a wrong method returns 405 (Allow header from the mux).
 //
 // sink is the storage backend for accepted reports (scrub + encrypt + R2, #9).
 // It is injected so the deployed Worker supplies the real R2/Secrets-Store sink
 // while cmd/devserver and tests supply an in-memory one. A nil sink defaults to
 // ingest.NopSink, which enforces the full HTTP contract but discards bodies.
-func New(sink ingest.Sink) http.Handler {
+//
+// admin is the maintainer admin API backend (#11): the lifecycle Manager plus the
+// shared-secret token, injected the same way. A nil admin registers the admin
+// routes but fails every request closed with 401, so the endpoints' shape is
+// always present and can never be silently left unauthenticated.
+func New(sink ingest.Sink, admin AdminBackend) http.Handler {
+	if admin == nil {
+		admin = denyAllBackend{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
 	mux.Handle("/v1/reports", ingest.NewHandler(sink))
+	(&adminAPI{backend: admin}).register(mux)
 	mux.HandleFunc("/", root)
 	return mux
 }
