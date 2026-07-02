@@ -1,0 +1,15 @@
+{
+  "name": "libremail-bug-report-ingest",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cloudflare Worker (Go/Wasm) that ingests LibreMail debug bug-reports.",
+  "scripts": {
+    "build": "go run github.com/syumai/workers/cmd/workers-assets-gen && tinygo build -o ./build/app.wasm -target wasm -no-debug ./worker",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.106.0"
+  }
+}

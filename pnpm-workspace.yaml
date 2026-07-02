@@ -1,0 +1,7 @@
+# Approve build (postinstall) scripts for wrangler's toolchain deps.
+# These are first-party Cloudflare / well-known packages required by
+# `wrangler dev`/`deploy`; they are not needed for `go test` or the dev server.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

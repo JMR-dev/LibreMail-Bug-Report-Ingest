@@ -1,0 +1,19 @@
+{
+  // Cloudflare Worker config for local dev and deploy.
+  // Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+  "name": "libremail-bug-report-ingest",
+
+  // Entry module. The TinyGo build (see package.json "build") produces the Wasm
+  // binary at ./build/app.wasm and workers-assets-gen produces this shim, which
+  // instantiates the Wasm module. The ./build/ artifacts are git-ignored and are
+  // created by `pnpm run build` (which requires TinyGo).
+  "main": "./build/worker.mjs",
+
+  "compatibility_date": "2025-06-01",
+
+  // Wrangler runs this before dev/deploy to (re)build the Wasm + shim.
+  // Requires TinyGo locally; TinyGo is installed in CI.
+  "build": {
+    "command": "pnpm run build"
+  }
+}
