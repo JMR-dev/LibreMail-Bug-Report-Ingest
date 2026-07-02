@@ -66,6 +66,19 @@
       "binding": "GITHUB_TOKEN",
       "store_id": "<store-id>",
       "secret_name": "github-token"
+    },
+    // OpenTelemetry OTLP auth headers (#17). The OTLP exporter (internal/telemetry)
+    // sends these headers on every /v1/traces and /v1/logs POST — typically an auth
+    // token, e.g. "Authorization=Bearer <token>" or "x-api-key=<key>"; multiple are
+    // comma-separated ("k1=v1,k2=v2"). Kept as a Secrets Store secret so the token
+    // is never committed. OPTIONAL: if the OTLP backend needs no auth (or auth is in
+    // the endpoint URL) this can be omitted — the exporter then sends no auth header.
+    // The Worker reads it lazily per run via worker/telemetry_wasm.go
+    // otelHeadersSecret. Replace "<store-id>" at deploy time.
+    {
+      "binding": "OTEL_EXPORTER_OTLP_HEADERS",
+      "store_id": "<store-id>",
+      "secret_name": "otel-exporter-otlp-headers"
     }
   ],
 
@@ -73,8 +86,18 @@
   // job (#14) files issues on; it is configurable here without a code change and
   // defaults to "JMR-dev/LibreMail" in worker/scheduled_wasm.go if unset. Read via
   // cloudflare.Getenv(GITHUB_REPO).
+  //
+  // OpenTelemetry (#17): OTEL_EXPORTER_OTLP_ENDPOINT is the base OTLP/HTTP URL the
+  // exporter POSTs traces + logs to ("/v1/traces" and "/v1/logs" are appended).
+  // The backend/endpoint is deliberately TBD — left EMPTY here, which disables
+  // telemetry (the Worker behaves exactly as before) until a collector/backend is
+  // chosen and this is set (a non-secret URL; the auth token lives in the
+  // OTEL_EXPORTER_OTLP_HEADERS secret above). OTEL_SERVICE_NAME overrides the
+  // reported service.name (defaults to "libremail-bug-report-ingest").
   "vars": {
-    "GITHUB_REPO": "JMR-dev/LibreMail"
+    "GITHUB_REPO": "JMR-dev/LibreMail",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    "OTEL_SERVICE_NAME": "libremail-bug-report-ingest"
   },
 
   // Cron Triggers for the weekly publish job (#13): "Friday 17:00 America/Chicago
