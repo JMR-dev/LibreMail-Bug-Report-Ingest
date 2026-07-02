@@ -64,10 +64,7 @@ This runs the exact handler the deployed Worker uses, minus the Workers runtime.
 ### Build & run the real Worker (requires TinyGo)
 
 Node tooling is managed with **pnpm**; wrangler is a dev dependency. The Wasm
-build uses [TinyGo](https://tinygo.org) 0.41.1 on the Go 1.25.x toolchain.
-(TinyGo 0.41.1 cannot compile `net/http` against Go 1.26 — see
-[tinygo-org/tinygo#5467](https://github.com/tinygo-org/tinygo/issues/5467) —
-so the module pins `go 1.25` in `go.mod`; CI installs and enforces this.)
+build uses [TinyGo](https://tinygo.org) 0.35.0+.
 
 ```console
 pnpm install                 # install wrangler
