@@ -1,0 +1,9 @@
+name: libremail-bug-report-ingest-infra
+runtime: go
+description: >-
+  Pulumi (Go) infrastructure for the LibreMail bug-report ingest pipeline:
+  the Cloudflare Worker, the encrypted-report Cloudflare R2 bucket, and the
+  Google Cloud DNS record that points the ingest hostname at the Worker.
+  Secrets (Cloudflare API token, GCP credentials) live in the stack config as
+  Pulumi secrets / in the provider environment and are never committed. See
+  README.md for the full config + secret contract.

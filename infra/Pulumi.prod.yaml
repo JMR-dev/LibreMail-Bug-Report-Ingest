@@ -1,0 +1,30 @@
+# Prod stack configuration.
+#
+# NON-SECRET values only. Secrets (Cloudflare API token, GCP credentials) are set
+# with `pulumi config set --secret ...` (they land here ENCRYPTED) or supplied via
+# provider environment variables. NEVER commit a plaintext secret. See README.md.
+#
+# Replace every REPLACE_ME_* value below with your real prod account/zone/domain
+# before running `pulumi up`.
+config:
+  # --- GCP provider (see also GOOGLE_CREDENTIALS / gcp:credentials) ---
+  gcp:project: REPLACE_ME_GCP_PROJECT_ID
+
+  # --- Program config (namespace = project name from Pulumi.yaml) ---
+  libremail-bug-report-ingest-infra:cloudflareAccountId: REPLACE_ME_CLOUDFLARE_ACCOUNT_ID
+  libremail-bug-report-ingest-infra:workerName: libremail-bug-report-ingest
+  libremail-bug-report-ingest-infra:workerCompatibilityDate: "2025-06-01"
+  libremail-bug-report-ingest-infra:r2BucketName: libremail-bug-reports
+  # R2 location hint (optional). One of: apac, eeur, enam, weur, wnam, oc.
+  libremail-bug-report-ingest-infra:r2BucketLocation: enam
+  # Google Cloud DNS managed-zone NAME (the zone already exists; it is referenced,
+  # not created, by this stack).
+  libremail-bug-report-ingest-infra:dnsManagedZone: REPLACE_ME_GCLOUD_DNS_MANAGED_ZONE_NAME
+  # Ingest hostname (FQDN, trailing dot) and the Worker route/custom-domain it
+  # points at (CNAME target, FQDN, trailing dot).
+  libremail-bug-report-ingest-infra:dnsRecordName: bugreport.libremail.example.
+  libremail-bug-report-ingest-infra:dnsRecordType: CNAME
+  libremail-bug-report-ingest-infra:dnsRecordTarget: libremail-bug-report-ingest.REPLACE_ME_SUBDOMAIN.workers.dev.
+  libremail-bug-report-ingest-infra:dnsTtlSeconds: "300"
+  # Optional, reserved for #7 (rate-limit ruleset) and Worker routes/custom domain:
+  # libremail-bug-report-ingest-infra:cloudflareZoneId: REPLACE_ME_CLOUDFLARE_ZONE_ID
