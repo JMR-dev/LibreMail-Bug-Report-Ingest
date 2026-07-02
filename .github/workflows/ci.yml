@@ -1,0 +1,105 @@
+# Continuous integration for the LibreMail bug-report ingest Worker.
+#
+# Runs on every pull request targeting main and on every push to main. One job
+# vets and tests the build-tag-free Go core and then builds the TinyGo/Wasm
+# Cloudflare Worker end to end, so a red check reliably means "do not merge".
+#
+# Supply-chain note: every action (first- and third-party) is pinned to a full
+# commit SHA with a trailing "# vX.Y.Z" comment tracking the human-readable
+# release, matching the style of .github/workflows/autoupdate.yml.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege: the job only needs read access to check the repo out.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref so rapid pushes don't pile up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26'
+
+      # TinyGo is needed only for the Wasm Worker build (pnpm run build).
+      # install-binaryen (default true) provides wasm-opt, which TinyGo invokes
+      # for the -target wasm build. 0.41.1's vendored net/http js overlay is
+      # patched just before the build (see "Patch TinyGo net/http" below).
+      - name: Set up TinyGo
+        uses: acifani/setup-tinygo@dd8a7075d951a7595b2ef2123ed0ab1af0c13e56 # v3.0.0
+        with:
+          tinygo-version: '0.41.1'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: '10'
+
+      # setup-node's pnpm cache needs pnpm already on PATH (hence after
+      # action-setup); it caches the pnpm store keyed on pnpm-lock.yaml.
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Vet Go
+        run: go vet ./...
+
+      - name: Test Go
+        run: go test ./...
+
+      # Robust to future modules: ticket #2 will add an infra/ Go module. Guarded
+      # with a dir check so this is a no-op until infra/go.mod exists.
+      - name: Vet and test infra module (if present)
+        run: |
+          if [ -f infra/go.mod ]; then
+            echo "infra/go.mod present; running go vet and go test in infra/"
+            ( cd infra && go vet ./... && go test ./... )
+          else
+            echo "infra/go.mod not present; skipping (no-op until ticket #2)"
+          fi
+
+      # TEMPORARY (tracking #26; tinygo-org/tinygo#5467): TinyGo 0.41.1 and
+      # earlier vendor tinygo-org/net@e54965e, whose net/http js/wasm overlay
+      # (roundtrip_js.go) calls the private t.roundTrip fallback that no longer
+      # exists in Go 1.25+/1.26 net/http, so the wasm build fails to compile.
+      # Apply the exact upstream fix (tinygo-org/net@1026408a) to the installed
+      # TinyGo source. git apply exits non-zero (failing the job loudly) if the
+      # source has drifted, so we notice when TinyGo changes upstream.
+      # TODO: delete this step and .ci/tinygo-net-roundtrip.patch once a TinyGo
+      # release later than 0.41.1 ships the fix (already on TinyGo's dev branch).
+      - name: Patch TinyGo net/http (temporary)
+        run: |
+          patch_file="$PWD/.ci/tinygo-net-roundtrip.patch"
+          tinygoroot="$(tinygo env TINYGOROOT)"
+          echo "Applying $patch_file to $tinygoroot/src/net/http/roundtrip_js.go"
+          git -C "$tinygoroot" apply --verbose "$patch_file" || {
+            echo "::error::TinyGo net/http patch did not apply cleanly; TinyGo source may have changed. Update or remove .ci/tinygo-net-roundtrip.patch (see #26)."
+            exit 1
+          }
+
+      # Confirms the Wasm Worker builds end to end: workers-assets-gen emits the
+      # JS shim and TinyGo compiles ./worker into build/app.wasm.
+      - name: Build Wasm Worker
+        run: pnpm run build
