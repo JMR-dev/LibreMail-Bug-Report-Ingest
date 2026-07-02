@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -37,6 +38,30 @@ func (m *MemoryStore) Get(_ context.Context, key string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	return append([]byte(nil), data...), nil
+}
+
+// List returns the stored keys that start with prefix, in sorted order. A prefix
+// of "" lists every key (equivalent to Keys).
+func (m *MemoryStore) List(_ context.Context, prefix string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var keys []string
+	for k := range m.objects {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// Delete removes the object at key. Deleting an absent key is a no-op (nil),
+// matching R2's idempotent delete so a retried transition behaves identically.
+func (m *MemoryStore) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
+	return nil
 }
 
 // Keys returns the stored object keys in sorted order (test/ops helper).

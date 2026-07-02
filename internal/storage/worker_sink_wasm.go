@@ -96,7 +96,8 @@ func getSecret(binding string) ([]byte, error) {
 }
 
 // await resolves a JS Promise from the calling goroutine (the Worker runs each
-// handler in its own goroutine, so the JS event loop can settle the promise).
+// handler in its own goroutine, so the JS event loop can settle the promise). It
+// is shared by the Secrets Store read (getSecret) and the R2 list paging (List).
 func await(p js.Value) (js.Value, error) {
 	resCh := make(chan js.Value, 1)
 	errCh := make(chan error, 1)
@@ -118,7 +119,7 @@ func await(p js.Value) (js.Value, error) {
 		if len(args) > 0 {
 			msg = args[0].Call("toString").String()
 		}
-		errCh <- fmt.Errorf("secrets store: %s", msg)
+		errCh <- fmt.Errorf("await: promise rejected: %s", msg)
 		return js.Undefined()
 	})
 	p.Call("then", then).Call("catch", catch)
