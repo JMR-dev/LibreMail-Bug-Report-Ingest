@@ -25,5 +25,10 @@ func main() {
 	// The maintainer admin API (#11) is wired with workerAdminBackend, which reads
 	// the admin shared secret (ADMIN_TOKEN) from Secrets Store and drives the
 	// lifecycle Manager over R2 per request (see admin.go).
-	workers.Serve(handler.New(storage.NewWorkerSink(), workerAdminBackend{}))
+	//
+	// withWorkerTelemetry (#17) injects the OTEL telemetry provider into each
+	// request's context so the ingest handler emits spans + structured logs. It is
+	// a no-op until an OTLP endpoint is configured (the endpoint is TBD), so this
+	// wrapper does not change behaviour by default.
+	workers.Serve(withWorkerTelemetry(handler.New(storage.NewWorkerSink(), workerAdminBackend{})))
 }

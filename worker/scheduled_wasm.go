@@ -82,6 +82,12 @@ func runWeeklyTrigger(ctx context.Context) error {
 		return fmt.Errorf("schedule: build publisher: %w", err)
 	}
 
+	// Observability (#17): carry the OTEL telemetry provider in the context so the
+	// gated run emits a schedule.run span, the publisher emits a publish.run span
+	// with per-report child spans, and a failed run / cap-hit surfaces as an
+	// alertable signal. A no-op until an OTLP endpoint is configured (TBD).
+	ctx = scheduledContext(ctx)
+
 	// schedule.Run re-checks the gate (open here) and hands the pending ids to the
 	// publisher, which decrypts, formats, and creates one labeled GitHub issue per
 	// report. Cross-run de-dup is wired here (#15): the publisher's onPublished hook

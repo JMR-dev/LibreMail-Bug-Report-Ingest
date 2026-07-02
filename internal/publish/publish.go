@@ -8,12 +8,23 @@ import (
 	"strings"
 
 	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/crypto"
+	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/telemetry"
 )
 
 // DefaultMaxPerRun is ADR #6 §3.1's per-run issue cap: at most 50 issues per
 // weekly run. If more reports are pending, the oldest 50 are published and the
 // rest stay pending for the next run (schedule/lifecycle list oldest-first).
 const DefaultMaxPerRun = 50
+
+// Alert types (issue #17) emitted as structured OTEL signals so a backend alert
+// can key on them once an OTLP endpoint is chosen (TBD).
+const (
+	// alertCapHit fires when the per-run cap defers reports (the #14 follow-up:
+	// this previously only logged; it is now also a structured, alertable signal).
+	alertCapHit = "publish.cap_hit"
+	// alertRunFailed fires when the run finishes with one or more failures.
+	alertRunFailed = "publish.run_failed"
+)
 
 // PendingGetter fetches a pending report's still-encrypted frame by id. It is the
 // read half of lifecycle.Manager (#10) that the publish job needs; a narrow
@@ -188,7 +199,20 @@ func newPublisher(gh issueCreator, kr *crypto.Keyring, getter PendingGetter, opt
 // as failed and the maintainer is alerted. A failed report is not marked
 // published (onPublished not called), so it is retried on a later run.
 func (p *Publisher) Publish(ctx context.Context, ids []string) error {
+	// Observability (#17): a run-level span plus per-report child spans and a
+	// correlated log per report. When no telemetry provider rides in ctx (the
+	// default until an OTLP endpoint is configured) every call here is a no-op and
+	// behaviour is unchanged. The span is a child of the schedule.run span when
+	// invoked from the weekly trigger.
+	tel := telemetry.FromContext(ctx)
+	ctx, span := tel.StartSpan(ctx, "publish.run", telemetry.WithSpanKind(telemetry.SpanKindInternal))
+	defer span.End()
+	span.SetAttributes(telemetry.Int("publish.pending", len(ids)))
+
 	if len(ids) == 0 {
+		span.SetAttributes(telemetry.Int("publish.attempted", 0), telemetry.Int("publish.published", 0))
+		span.SetStatus(telemetry.StatusOK, "")
+		tel.Info(ctx, "publish run: no pending reports")
 		return nil
 	}
 
@@ -198,6 +222,7 @@ func (p *Publisher) Publish(ctx context.Context, ids []string) error {
 		batch = batch[:p.maxPerRun] // oldest-first; remainder drains next run
 		capHit = true
 	}
+	span.SetAttributes(telemetry.Int("publish.attempted", len(batch)))
 
 	// Ensure the three ADR #6 labels exist once per run (idempotent). Best-effort:
 	// a failure is surfaced but does not abort publishing — issue creation still
@@ -206,6 +231,8 @@ func (p *Publisher) Publish(ctx context.Context, ids []string) error {
 	if err := p.gh.EnsureLabels(ctx, p.labels); err != nil {
 		p.logf("publish: ensure labels (continuing, labels applied best-effort): %v", err)
 		errs = append(errs, fmt.Errorf("ensure labels: %w", err))
+		tel.Warn(ctx, "publish: ensure labels failed (continuing best-effort)",
+			telemetry.String("error", err.Error()))
 	}
 
 	names := LabelNames(p.labels)
@@ -215,24 +242,72 @@ func (p *Publisher) Publish(ctx context.Context, ids []string) error {
 			errs = append(errs, err)
 			break
 		}
-		if err := p.publishOne(ctx, id, names); err != nil {
+		rctx, rspan := tel.StartSpan(ctx, "publish.report",
+			telemetry.WithSpanKind(telemetry.SpanKindInternal),
+			telemetry.WithAttributes(telemetry.String("report.id", id)))
+		if err := p.publishOne(rctx, id, names); err != nil {
 			p.logf("publish: report %s failed, left pending: %v", id, err)
 			errs = append(errs, fmt.Errorf("report %s: %w", id, err))
+			rspan.SetAttributes(telemetry.String("report.outcome", "failed"))
+			rspan.SetStatus(telemetry.StatusError, err.Error())
+			tel.Error(rctx, "publish: report failed, left pending",
+				telemetry.String("report.id", id),
+				telemetry.String("report.outcome", "failed"),
+				telemetry.String("error", err.Error()))
+			rspan.End()
 			continue
 		}
 		published++
+		rspan.SetAttributes(telemetry.String("report.outcome", "published"))
+		rspan.SetStatus(telemetry.StatusOK, "")
+		tel.Info(rctx, "publish: report published",
+			telemetry.String("report.id", id),
+			telemetry.String("report.outcome", "published"))
+		rspan.End()
 	}
 
 	if capHit {
+		deferred := len(ids) - len(batch)
 		// ADR #6 §3.1: alert the maintainer that the cap was hit and reports were
-		// deferred. The log line is the alert channel until dedicated alerting lands.
+		// deferred. The log line remains for humans...
 		p.logf("publish: per-run cap %d reached: published %d of %d pending this run; %d deferred to next run",
-			p.maxPerRun, published, len(ids), len(ids)-len(batch))
+			p.maxPerRun, published, len(ids), deferred)
+		// ...and (#17, folding in the #14 follow-up) the cap-hit is now also emitted
+		// as a structured, alertable OTEL signal rather than only a log line.
+		span.AddEvent(alertCapHit,
+			telemetry.Int("publish.cap", p.maxPerRun),
+			telemetry.Int("publish.deferred", deferred))
+		span.SetAttributes(telemetry.Bool("publish.cap_hit", true), telemetry.Int("publish.deferred", deferred))
+		capAttrs := append(telemetry.Alert(alertCapHit),
+			telemetry.Int("publish.cap", p.maxPerRun),
+			telemetry.Int("publish.published", published),
+			telemetry.Int("publish.pending", len(ids)),
+			telemetry.Int("publish.deferred", deferred))
+		tel.Warn(ctx, "publish: per-run cap reached; reports deferred to next run", capAttrs...)
 	}
 	p.logf("publish: run complete: %d published, %d failed, of %d attempted",
 		published, len(batch)-published, len(batch))
 
-	return errors.Join(errs...)
+	joined := errors.Join(errs...)
+	failed := len(batch) - published
+	span.SetAttributes(
+		telemetry.Int("publish.published", published),
+		telemetry.Int("publish.failed", failed),
+	)
+	if joined != nil {
+		span.SetStatus(telemetry.StatusError, joined.Error())
+		runAttrs := append(telemetry.Alert(alertRunFailed),
+			telemetry.Int("publish.published", published),
+			telemetry.Int("publish.failed", failed),
+			telemetry.Int("publish.attempted", len(batch)))
+		tel.Error(ctx, "publish run failed", runAttrs...)
+	} else {
+		span.SetStatus(telemetry.StatusOK, "")
+		tel.Info(ctx, "publish run complete",
+			telemetry.Int("publish.published", published),
+			telemetry.Int("publish.failed", failed))
+	}
+	return joined
 }
 
 // publishOne runs the full pipeline for a single report id. It returns an error

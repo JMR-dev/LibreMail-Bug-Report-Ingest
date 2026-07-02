@@ -14,12 +14,15 @@
 package ingest
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"strings"
+
+	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/telemetry"
 )
 
 // MaxBodyBytes is the hard cap on the request body: 256 KiB (262,144 bytes),
@@ -54,7 +57,34 @@ func NewHandler(sink Sink) *Handler {
 //	sink failure                           -> 503
 //
 // Error bodies are generic ({"error":"..."}) and never reflect request content.
+//
+// Observability (#17): when a telemetry provider rides in the request context
+// (injected by the Worker), each request emits an "ingest.request" span and a
+// correlated structured log classifying the outcome (accepted / rejected /
+// error). Instrumentation is observe-only — it wraps the response writer to read
+// the status code and never alters the HTTP contract above — and is skipped
+// entirely (zero overhead, identical behaviour) when no provider is present,
+// which is the default until an OTLP endpoint is configured.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	tel := telemetry.FromContext(r.Context())
+	if !tel.Enabled() {
+		h.serve(w, r)
+		return
+	}
+	ctx, span := tel.StartSpan(r.Context(), "ingest.request",
+		telemetry.WithSpanKind(telemetry.SpanKindServer),
+		telemetry.WithAttributes(telemetry.String("http.request.method", r.Method)))
+	defer span.End()
+
+	sw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	h.serve(sw, r.WithContext(ctx))
+	finishIngestSpan(ctx, tel, span, sw.status)
+}
+
+// serve is the transport contract from ServeHTTP's doc, unchanged. It is split
+// out so ServeHTTP can wrap it with observe-only instrumentation without
+// touching a single response path.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -127,6 +157,110 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // caller-supplied string and must never include request-derived content.
 func writeError(w http.ResponseWriter, status int, reason string) {
 	writeJSON(w, status, map[string]string{"error": reason})
+}
+
+// statusRecorder wraps an http.ResponseWriter to capture the status code the
+// handler wrote, so the ingest span/log can record the outcome. It is a pure
+// pass-through: it changes no bytes and no headers.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wrote {
+		s.status = code
+		s.wrote = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wrote {
+		// An implicit 200 (no explicit WriteHeader) — not a path this handler
+		// takes, but recorded correctly for completeness.
+		s.status = http.StatusOK
+		s.wrote = true
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// Ingest outcome vocabulary, recorded as the "ingest.outcome" attribute so a
+// backend can group/alert by it.
+const (
+	outcomeAccepted    = "accepted"
+	outcomeRejected    = "rejected"
+	outcomeRateLimited = "rate_limited"
+	outcomeError       = "error"
+)
+
+// alertIngestError is the alert.type for the ingest error signal (issue #17):
+// the "elevated ingest error rate" a backend alert keys on. It marks the 5xx
+// (e.g. 503 storage-unavailable) responses that indicate a Worker-side fault, as
+// opposed to ordinary client rejections (4xx), which are expected and not
+// alerted.
+const alertIngestError = "ingest.error"
+
+// finishIngestSpan classifies the written status and records the span status,
+// attributes, and a correlated log record. Client rejections (4xx) are recorded
+// at INFO; server errors (5xx) set the span to Error and emit the alertable
+// ingest.error signal.
+func finishIngestSpan(ctx context.Context, tel *telemetry.Telemetry, span *telemetry.Span, status int) {
+	outcome, reason := classifyIngest(status)
+	span.SetAttributes(
+		telemetry.Int("http.response.status_code", status),
+		telemetry.String("ingest.outcome", outcome),
+	)
+	if reason != "" {
+		span.SetAttributes(telemetry.String("ingest.reason", reason))
+	}
+
+	switch outcome {
+	case outcomeAccepted:
+		span.SetStatus(telemetry.StatusOK, "")
+		tel.Info(ctx, "ingest request accepted",
+			telemetry.String("ingest.outcome", outcome),
+			telemetry.Int("http.response.status_code", status))
+	case outcomeError:
+		span.SetStatus(telemetry.StatusError, reason)
+		attrs := append(telemetry.Alert(alertIngestError),
+			telemetry.String("ingest.outcome", outcome),
+			telemetry.String("ingest.reason", reason),
+			telemetry.Int("http.response.status_code", status))
+		tel.Error(ctx, "ingest request failed", attrs...)
+	default: // rejected / rate_limited: expected client outcomes, not alerts.
+		tel.Info(ctx, "ingest request "+outcome,
+			telemetry.String("ingest.outcome", outcome),
+			telemetry.String("ingest.reason", reason),
+			telemetry.Int("http.response.status_code", status))
+	}
+}
+
+// classifyIngest maps an HTTP status to the ingest outcome vocabulary. Reasons
+// are derived at status granularity (the response paths never echo request
+// content, so neither do these).
+func classifyIngest(status int) (outcome, reason string) {
+	switch {
+	case status >= 200 && status < 300:
+		return outcomeAccepted, ""
+	case status == http.StatusTooManyRequests: // 429 — enforced at the edge today
+		return outcomeRateLimited, "rate_limited"
+	case status == http.StatusServiceUnavailable: // 503
+		return outcomeError, "storage_unavailable"
+	case status >= 500:
+		return outcomeError, "server_error"
+	case status == http.StatusRequestEntityTooLarge: // 413
+		return outcomeRejected, "payload_too_large"
+	case status == http.StatusUnsupportedMediaType: // 415
+		return outcomeRejected, "unsupported_media_type"
+	case status == http.StatusMethodNotAllowed: // 405
+		return outcomeRejected, "method_not_allowed"
+	case status >= 400:
+		return outcomeRejected, "invalid_request"
+	default:
+		return outcomeAccepted, ""
+	}
 }
 
 // compile-time assurance that the stub sinks satisfy Sink.

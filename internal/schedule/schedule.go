@@ -31,7 +31,14 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/JMR-dev/LibreMail-Bug-Report-Ingest/internal/telemetry"
 )
+
+// alertScheduleRunFailed is the alert.type (issue #17) emitted as a structured
+// OTEL signal when a gated weekly run fails to list or publish, so a backend
+// alert can key on a failed scheduled run once an OTLP endpoint is chosen (TBD).
+const alertScheduleRunFailed = "schedule.run_failed"
 
 // PendingLister is the seam for "list the reports awaiting publication". It is
 // satisfied by *lifecycle.Manager (#10) via its ListPending method; tests inject
@@ -68,13 +75,36 @@ func Run(ctx context.Context, scheduledFor time.Time, lister PendingLister, publ
 		// sibling cron will fire at the correct Central hour. Do nothing.
 		return false, nil
 	}
+	// Observability (#17): trace the gated run end to end (list + publish). When
+	// no telemetry provider rides in ctx (the default until an OTLP endpoint is
+	// configured) this is a no-op and behaviour is unchanged; when present, the
+	// span becomes the parent of the publisher's publish.run span. A list/publish
+	// failure sets the span to Error and emits the alertable run-failed signal.
+	tel := telemetry.FromContext(ctx)
+	ctx, span := tel.StartSpan(ctx, "schedule.run",
+		telemetry.WithSpanKind(telemetry.SpanKindInternal),
+		telemetry.WithAttributes(telemetry.String("schedule.scheduled_for", scheduledFor.UTC().Format(time.RFC3339))))
+	defer span.End()
+
 	ids, err := lister.ListPending(ctx)
 	if err != nil {
-		return true, fmt.Errorf("schedule: list pending: %w", err)
+		wrapped := fmt.Errorf("schedule: list pending: %w", err)
+		span.SetStatus(telemetry.StatusError, wrapped.Error())
+		tel.Error(ctx, "schedule: list pending failed",
+			append(telemetry.Alert(alertScheduleRunFailed), telemetry.String("error", wrapped.Error()))...)
+		return true, wrapped
 	}
+	span.SetAttributes(telemetry.Int("schedule.pending", len(ids)))
+	tel.Info(ctx, "schedule: weekly trigger fired", telemetry.Int("schedule.pending", len(ids)))
+
 	if err := publisher.Publish(ctx, ids); err != nil {
-		return true, fmt.Errorf("schedule: publish: %w", err)
+		wrapped := fmt.Errorf("schedule: publish: %w", err)
+		span.SetStatus(telemetry.StatusError, wrapped.Error())
+		tel.Error(ctx, "schedule: publish run failed",
+			append(telemetry.Alert(alertScheduleRunFailed), telemetry.String("error", wrapped.Error()))...)
+		return true, wrapped
 	}
+	span.SetStatus(telemetry.StatusOK, "")
 	return true, nil
 }
 
