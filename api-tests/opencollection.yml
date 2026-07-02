@@ -1,0 +1,11 @@
+opencollection: "1.0.0"
+
+info:
+  name: LibreMail Bug-Report Ingest API tests
+  # Contract tests for POST /v1/reports (GitHub issue #7).
+  # Run against the local dev server (cmd/devserver) on http://localhost:8787,
+  # which serves the exact same http.Handler as the deployed Cloudflare Worker.
+  #
+  # This collection is authored in the OpenCollection YAML format (the presence
+  # of this opencollection.yml file selects the "yml" format in @usebruno/cli),
+  # per the maintainer's requirement to avoid the .bru format.

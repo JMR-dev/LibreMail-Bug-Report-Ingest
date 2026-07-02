@@ -1,0 +1,27 @@
+info:
+  name: 415 - non-JSON content type is rejected
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/reports"
+  headers:
+    - name: Content-Type
+      value: text/plain
+  body:
+    type: text
+    data: |-
+      {
+        "appVersion": "1.0.0",
+        "platform": "android",
+        "report": "body is valid JSON but the Content-Type is not application/json"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("Content-Type other than application/json returns 415", function () {
+          expect(res.getStatus()).to.equal(415);
+        });
