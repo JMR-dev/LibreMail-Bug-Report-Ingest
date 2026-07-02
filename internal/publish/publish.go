@@ -23,6 +23,18 @@ type PendingGetter interface {
 	GetPending(ctx context.Context, id string) ([]byte, error)
 }
 
+// Marker is the write half of lifecycle.Manager (#10) the publish job needs to
+// complete cross-run de-duplication (#15): once a report is confirmed published as
+// a GitHub issue (a 201), MarkPublished transitions it out of the pending set so a
+// later run's ListPending no longer returns it and it is never re-published. It is
+// idempotent — re-marking an already-published id succeeds — so a retried mark
+// converges. *lifecycle.Manager satisfies it via MarkPublished. A narrow interface
+// (mirroring PendingGetter, the read half) keeps this package host-testable and
+// free of the Wasm-only storage backends.
+type Marker interface {
+	MarkPublished(ctx context.Context, id string) error
+}
+
 // issueCreator is the slice of the GitHub client the Publisher depends on. *Client
 // satisfies it; tests use a mock to exercise orchestration (cap, isolation, the
 // onPublished seam) without an httptest server.
@@ -56,6 +68,54 @@ func WithOnPublished(fn func(ctx context.Context, id string) error) Option {
 	return func(p *Publisher) {
 		if fn != nil {
 			p.onPublished = fn
+		}
+	}
+}
+
+// WithMarkPublished wires the post-publish hook (see WithOnPublished) to m's
+// lifecycle transition, completing #15: each report is marked published the moment
+// its issue is confirmed created, so it leaves the pending set and the next run's
+// ListPending does not return it — no duplicate issue. This is the production
+// wiring the Worker's buildPublish uses; host tests use it with a real
+// lifecycle.Manager over a MemoryStore.
+//
+// # The partial-failure guarantee (why de-dup falls out for free)
+//
+// The hook runs only on a confirmed 201 and per-report failures are isolated (see
+// Publish/publishOne). So in a run of N reports where report k fails to create,
+// reports that already succeeded were each marked published and drop out of the
+// pending set, while k (and any later failure) was never marked and stays pending.
+// The next run lists only the still-pending reports and retries exactly those,
+// never re-creating the already-published ones.
+//
+// # Mark-failure risk (honest note)
+//
+// Because the hook runs after the 201, the issue already exists when MarkPublished
+// runs. If MarkPublished then fails, the report stays pending and WILL be
+// re-published as a DUPLICATE issue next run — there is no GitHub-side idempotency
+// key to prevent that, and we cannot un-create the issue. We surface the failure
+// two ways: a loud log line naming the report and the duplicate risk, and the
+// returned error (which fails the run so the maintainer is alerted). MarkPublished
+// is itself idempotent, so a *partially* applied transition (copy done, delete
+// not) converges on any later mark; the residual exposure is at most one duplicate
+// issue, flagged loudly for manual reconciliation.
+func WithMarkPublished(m Marker) Option {
+	return func(p *Publisher) {
+		if m == nil {
+			return
+		}
+		p.onPublished = func(ctx context.Context, id string) error {
+			if err := m.MarkPublished(ctx, id); err != nil {
+				// The issue is already created (this runs only on a confirmed 201). A
+				// failed mark leaves the report pending, so it may be re-published as a
+				// duplicate next run. Log loudly; the error is also returned to fail the
+				// run. p.logf is read at call time, so it reflects any WithLogger override.
+				p.logf("publish: WARNING report %s was published as a GitHub issue but MarkPublished failed: %v; "+
+					"it remains pending and may be re-published as a DUPLICATE next run "+
+					"(MarkPublished is idempotent, so a later retry converges)", id, err)
+				return err
+			}
+			return nil
 		}
 	}
 }
@@ -111,14 +171,13 @@ func newPublisher(gh issueCreator, kr *crypto.Keyring, getter PendingGetter, opt
 //
 // # De-duplication seam (#15)
 //
-// This ticket (#14) creates the issues; it deliberately does NOT mark reports
-// published. Cross-run de-dup is completed by #15, which injects onPublished →
-// lifecycle.MarkPublished so a published report leaves the pending set and is not
-// re-published next run. The contract that makes this safe (ADR #6 §3.2,
-// "mark published only on a confirmed 201") is upheld here: onPublished runs only
-// after CreateIssue returns success, so #15 only ever marks confirmed-created
-// reports. Until #15 lands the default onPublished is a no-op, so reports remain
-// pending and would republish — acceptable pre-#15 and intentional.
+// This package creates the issues; cross-run de-dup is completed by wiring
+// onPublished → lifecycle.MarkPublished (WithMarkPublished, #15) so a published
+// report leaves the pending set and is not re-published next run. The contract
+// that makes this safe (ADR #6 §3.2, "mark published only on a confirmed 201") is
+// upheld here: onPublished runs only after CreateIssue returns success, so the
+// hook only ever marks confirmed-created reports. Left at its default no-op (no
+// WithMarkPublished), reports remain pending and would republish next run.
 //
 // # Failure isolation
 //
