@@ -1,6 +1,6 @@
 # LibreMail bug-report pipeline — data flow & privacy posture
 
-- **Status:** Living document (reflects the design as of the date below; some stages are not yet implemented — see [Implementation status](#implementation-status)).
+- **Status:** Living document (reflects the design as of the date below; several stages are not yet implemented — see [Current implementation status](#current-implementation-status)).
 - **Date:** 2026-07-02
 - **Applies to:** the server-side debug bug-report pipeline in this repo
   (`JMR-dev/LibreMail-Bug-Report-Ingest`) and its integration with the
@@ -14,17 +14,22 @@ user chooses to send one, and states plainly what privacy protections exist **an
 stop**. It is intentionally honest about limits: PII scrubbing is best-effort, not a
 guarantee, and several stages below are designed but not yet built.
 
-> **Maturity, up front.** As of this writing the deployed Worker exposes only bootstrap
-> health endpoints. The ingest endpoint, PII-scrub wiring, encrypted storage, review window,
-> and weekly publish job described below are **specified** (in the linked decision records
-> and tickets) but **not all implemented yet**. Each stage is tagged with its status, and
-> [Implementation status](#implementation-status) summarises what is live versus designed.
-> This document describes the *intended* posture; it does not claim the whole pipeline is
-> running today.
+> **Maturity, up front.** The HTTPS ingest endpoint (`POST /v1/reports` — method and
+> content-type checks, the 256 KiB size cap, v1 schema validation, and the full status-code
+> contract) and the best-effort PII-scrub library are **implemented**. Encrypted-at-rest
+> storage, the retention lifecycle, the manual review/removal window, and the weekly publish
+> job are **specified** (in the linked decision records and tickets) but **not yet built**.
+> Because the endpoint is currently wired to a no-op storage sink, accepted reports are not yet
+> retained, scrubbed in-line, encrypted, or published. This document describes the *intended*
+> end-to-end posture; see [Current implementation status](#current-implementation-status) for
+> exactly what is live today.
 
 ---
 
 ## Privacy at a glance
+
+*These points describe the pipeline's intended design; see
+[Current implementation status](#current-implementation-status) for what is live today.*
 
 - **Opt-in and user-initiated only.** A report is sent **only** when a user explicitly taps
   send on the app's review/submit screen. Nothing is ever collected or transmitted
@@ -48,9 +53,10 @@ guarantee, and several stages below are designed but not yet built.
 ## What a report contains
 
 A debug bug-report is small JSON metadata (such as app/OS version and device model) plus
-diagnostic text — logs, stack traces, and any free-text description the user adds. The exact
-schema is finalised in the ingest endpoint work
-([#7](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/7)). Reports are capped
+diagnostic text — logs, stack traces, and any free-text description the user adds. The v1
+payload schema is defined by the ingest endpoint
+([#7](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/7)): required `appVersion`,
+`platform`, and `report`, plus optional `osVersion`, `device`, and `clientTimestamp`. Reports are capped
 at **256 KiB** on ingest; realistic reports are a few KiB to low tens of KiB.
 
 Because diagnostic text is free-form, a report **can** contain personal or sensitive data the
@@ -63,17 +69,17 @@ relying on any single control.
 
 ## End-to-end data flow
 
-Each stage is tagged: **[live]** = implemented; **[designed]** = specified in an ADR/ticket
-but not yet implemented.
+The stages below describe the *intended* end-to-end design. For which stages exist in code
+today, see [Current implementation status](#current-implementation-status).
 
-### 1. Opt-in submission (in the app) — [designed, app side]
+### 1. Opt-in submission (in the app)
 
 The user triggers a debug report from the app's review/submit screen
 ([LibreMail#33](https://github.com/JMR-dev/LibreMail/issues/33)). This is **user-initiated
 only**: there is no automatic, scheduled, or background submission path. The user is shown the
 report and must actively choose to send it.
 
-### 2. HTTPS ingest — `POST /v1/reports` — [designed]
+### 2. HTTPS ingest — `POST /v1/reports`
 
 The app sends the report over **HTTPS** to the Cloudflare Worker's ingest endpoint. The
 endpoint:
@@ -82,17 +88,22 @@ endpoint:
 - requires `Content-Type: application/json` (`415` otherwise);
 - enforces a hard **256 KiB** body cap, rejecting larger bodies with `413` (checked both via
   `Content-Length` and while reading, so a missing or dishonest length cannot bypass it);
-- **validates** the body against the report schema, rejecting malformed input with `400`;
-- applies **per-IP rate limits** at the edge to resist abuse (deliberately generous, because
-  mobile clients share IPs behind carrier-grade NAT).
+- **validates** the body against the v1 report schema — required `appVersion`, `platform`, and
+  `report`, plus optional `osVersion`, `device`, and `clientTimestamp` — rejecting malformed or
+  invalid input with `400`; unknown fields are ignored so newer app versions stay compatible;
+- is designed to sit behind **per-IP rate limits** at the Cloudflare edge (to be provisioned via
+  the Pulumi IaC, [#2](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/2)) —
+  deliberately generous because mobile clients share IPs behind carrier-grade NAT. These edge
+  rules are **not yet provisioned**.
 
-On success the endpoint returns **`202 Accepted`** (the pipeline is asynchronous). Error
+On success the endpoint returns **`202 Accepted`** (the pipeline is asynchronous), or `503` if
+the storage backend is unavailable. Error
 responses are deliberately small and **never echo the request contents** or reveal whether a
 specific IP is individually blocked, to avoid leaking data back to a caller. The concrete
 size/rate/response contract is fixed in the labels-and-abuse decision record
 ([ADR #6](decisions/labels-and-abuse.md)).
 
-### 3. Best-effort PII scrub — [scrub library live; not yet wired]
+### 3. Best-effort PII scrub
 
 Before a report is persisted, it passes through a best-effort PII redaction pass
 ([`internal/scrub`](../internal/scrub/scrub.go),
@@ -107,12 +118,15 @@ the report stays readable for triage. It targets:
 - **IP addresses** (IPv4 and IPv6) → `[REDACTED_IP]`
 - **personal names** → `[REDACTED_NAME]` (a **deliberately weak**, key-directed heuristic)
 
-The redaction library is implemented and unit-tested, but it is **not yet invoked by a live
-ingest path**, because the endpoint in stage 2 is not yet built. Its important **limits** are
-detailed in [PII scrubbing is best-effort, not a guarantee](#pii-scrubbing-is-best-effort-not-a-guarantee)
-below — please read them; do not treat a scrubbed report as certified free of PII.
+The redaction library is implemented and unit-tested, but it is **not yet invoked on the live
+ingest path**: the ingest endpoint currently hands accepted bodies to a no-op storage sink, and
+scrubbing runs downstream of that seam once encrypted storage
+([#9](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/9)) is wired in. Its
+important **limits** are detailed in [PII scrubbing is best-effort, not a
+guarantee](#pii-scrubbing-is-best-effort-not-a-guarantee) below — please read them; do not treat
+a scrubbed report as certified free of PII.
 
-### 4. Encrypted-at-rest storage in R2 — [designed]
+### 4. Encrypted-at-rest storage in R2
 
 The scrubbed report is encrypted **in the Worker** with **AES-256-GCM** *before* it is written
 to a Cloudflare R2 bucket. Only ciphertext is ever handed to R2 — the storage service never
@@ -129,7 +143,7 @@ misconfiguration, an accidentally public bucket, or raw at-rest disclosure yield
 bytes). See [what encryption at rest does and does not
 protect](#encryption-at-rest-what-it-does-and-does-not-protect).
 
-### 5. Manual maintainer review & removal window — [designed]
+### 5. Manual maintainer review & removal window
 
 Stored reports are **not** published immediately. Between storage and the weekly publish run,
 the maintainer can review reports and **remove** any that should not be published — for
@@ -141,15 +155,16 @@ of stored objects (reports are intended to be short-lived — stored, published,
 deleted/tombstoned) is being finalised in
 [#10](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/10).
 
-### 6. Weekly publish to GitHub — [designed]
+### 6. Weekly publish to GitHub
 
 Every **Friday at 17:00 America/Chicago** (US Central, DST-aware), a scheduled job decrypts
 each not-yet-removed report and publishes it as a GitHub issue on the public app repo
 `JMR-dev/LibreMail`. Each auto-published issue is tagged with three labels — `bug-report`,
 `automated`, and `needs-triage` — so the maintainer can distinguish pipeline-originated
 reports from human-filed ones (see [ADR #6](decisions/labels-and-abuse.md)). The run is capped
-(oldest-first, with an alert if the cap is hit) to bound blast radius. Publishing is tracked
-in [#14](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/14) /
+(oldest-first, with an alert if the cap is hit) to bound blast radius. The scheduled trigger is
+tracked in [#13](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/13); the publish
+job in [#14](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/14) /
 [#15](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/15).
 
 > **Publication makes content public.** A published issue lives on the public app repo. From
@@ -226,21 +241,37 @@ substitution. In all of these an attacker with bucket access but no key gets not
 
 ---
 
-## Implementation status
+## Current implementation status
 
-Honest snapshot of what is built versus designed, so this document does not overstate the
-current posture.
+A concise, honest snapshot so this document does not overstate what runs today. This section is
+the single source of truth for status; the flow above describes the *intended* design.
 
-| Stage | Component | Status |
-| ----- | --------- | ------ |
-| 1 | Opt-in submission (app review/submit screen) | Designed — app side ([LibreMail#33](https://github.com/JMR-dev/LibreMail/issues/33)) |
-| 2 | HTTPS ingest endpoint `POST /v1/reports` (size cap, validation, rate limits, response contract) | **Designed, not implemented** ([#7](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/7); contract in [ADR #6](decisions/labels-and-abuse.md)). Deployed Worker currently serves only bootstrap health endpoints. |
-| 3 | Best-effort PII scrub | **Library implemented & unit-tested** ([`internal/scrub`](../internal/scrub/scrub.go), [#8](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/8)); **not yet wired** into a live path (waits on stage 2). |
-| 4 | Encrypted-at-rest R2 storage (AES-256-GCM, key in Secrets Store) | Designed ([ADR #5](decisions/encryption.md)); implementation **not yet done** ([#9](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/9)). |
-| 5 | Manual review / removal window; object lifecycle/retention | Designed, **not yet implemented** ([#11](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/11), [#10](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/10)). |
-| 6 | Weekly publish job (Fri 17:00 America/Chicago) + labels | Designed ([ADR #6](decisions/labels-and-abuse.md)); implementation **not yet done** ([#14](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/14), [#15](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/15)). |
+**Implemented in this repo:** the service bootstrap and health endpoints
+([#1](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/1)); continuous integration
+([#3](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/3)); the Pulumi
+infrastructure-as-code that provisions the Worker, the R2 bucket, and DNS
+([#2](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/2)); the HTTPS ingest
+endpoint `POST /v1/reports` with its 256 KiB cap, v1 schema validation, and full status-code
+contract ([#7](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/7)); and the
+best-effort PII-scrub library
+([#8](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/8)).
 
-This table will be updated as stages land.
+**Not yet implemented:** encrypted-at-rest R2 storage logic
+([#9](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/9)); object
+retention/lifecycle ([#10](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/10));
+the manual review/removal window
+([#11](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/11)); the scheduled trigger
+([#13](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/13)); the weekly publish
+job ([#14](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/14) /
+[#15](https://github.com/JMR-dev/LibreMail-Bug-Report-Ingest/issues/15)); and the edge
+rate-limiting ruleset (designed in [ADR #6](decisions/labels-and-abuse.md), reserved in the IaC
+but not yet provisioned).
+
+**What this means today:** the ingest endpoint validates and accepts reports but is wired to a
+no-op storage sink, so accepted reports are **not** currently retained, scrubbed in-line,
+encrypted, or published. The scrub library exists and is unit-tested but is not yet invoked on
+the live request path — it runs downstream of the storage seam, which lands with #9. This
+section is updated as stages land.
 
 ---
 
@@ -248,6 +279,8 @@ This table will be updated as stages land.
 
 - [ADR #5 — Encryption scheme & key custody for R2 objects](decisions/encryption.md)
 - [ADR #6 — GitHub labels + ingest abuse / rate-limit policy](decisions/labels-and-abuse.md)
+- [`internal/ingest`](../internal/ingest/) — the `POST /v1/reports` endpoint, v1 schema, and
+  response contract
 - [`internal/scrub/scrub.go`](../internal/scrub/scrub.go) — the best-effort redaction pass and
   its documented limitations
 - Project [README](../README.md) — overview and repository layout
